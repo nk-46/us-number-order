@@ -172,3 +172,4 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+.ipynb_checkpoints anaconda_projects Analysis.ipynb analysis.py assistant_filtered_responses.csv email_desc.py filtered_longcodes.csv Flow for Number Profile Check and Purchase Process.png Inteliquent_API_V2.yaml ngrok openai_filter.py public_comments.csv us-ca-number_zd_view.csv us_ca_lc_march.csv us_ca_lc_no_march.csv us-ca-number-order-view-2025-04-10-1717-csv.zip zendesk_tickets.db zd_number_parser.py .DS_Store .env
