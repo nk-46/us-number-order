@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 import sqlite3
 import requests
 import os
-from parse_and_search import handle_user_request, run_assistant_with_input, search_iq_inventory, search_plivo_numbers, order_reserved_numbers, retrieve_reserved_iq
+from main import handle_user_request, run_assistant_with_input, search_iq_inventory, search_plivo_numbers, order_reserved_numbers, retrieve_reserved_iq
 
 app = Flask(__name__)
 
