@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import base64
 import requests
 import logging
 import json
@@ -31,16 +32,19 @@ client = RestClient(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
 # Inteliquent
 iq_access_token = os.getenv("IQ_ACCESS_TOKEN")
 iq_private_key = os.getenv("IQ_PRIVATE_KEY")
+iq_secret_key = os.getenv("IQ_SECRET_KEY")
 iq_api_base_url = "https://services.inteliquent.com/Services/2.0.0"
 search_inventory_endpoint = "/tnInventory"
 reserve_number_endpoint = "/tnReserve"
 retrieve_reserved_number_endpoint = "/tnReservedList"
 order_iq_reserved_endpoint = "/tnOrder"
 
-
+# Encode inteliquent credentials to Base64
+credentials = f"{iq_private_key}:{iq_secret_key}"
+encoded_credentials = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
 
 iq_headers = {
-    "Authorization": f"Bearer {iq_access_token}",
+    "Authorization": f"Basic {encoded_credentials}",
     "Content-Type": "application/json"
 }
 
