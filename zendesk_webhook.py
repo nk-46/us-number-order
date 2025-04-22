@@ -87,7 +87,7 @@ def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_
             "ticket": {
                 "comment": {
                     "body": public_comment,
-                    "public": True
+                    "public": False   #will be changed to True in production.
                 },
                 "tags": existing_tags,
                 "custom_fields" : [
