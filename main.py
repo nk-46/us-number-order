@@ -50,7 +50,7 @@ iq_headers = {
 }
 
 # Configure logging
-LOG_FILE = "us_ca_lc.log"
+LOG_FILE = "/data/us_ca_lc.log"
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",

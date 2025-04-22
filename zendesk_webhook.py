@@ -14,7 +14,7 @@ ZENDESK_SUBDOMAIN = os.getenv("ZENDESK_SUBDOMAIN")
 ZENDESK_EMAIL = os.getenv("ZENDESK_EMAIL")
 ZENDESK_TOKEN = os.getenv("ZENDESK_TOKEN")
 
-DB_NAME = 'zendesk_tickets.db'
+DB_NAME = '/data/zendesk_tickets.db'
 
 def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_tag="us_number_order_ai_automation",prefix=None):
     url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/{ticket_id}.json"
