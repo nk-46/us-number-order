@@ -2,6 +2,9 @@ from flask import Flask, request, jsonify
 import sqlite3
 import requests
 import os
+import time
+import json
+import uuid
 from main import handle_user_request, run_assistant_with_input, search_iq_inventory, search_plivo_numbers, order_reserved_numbers, retrieve_reserved_iq
 
 app = Flask(__name__)
@@ -13,7 +16,7 @@ ZENDESK_TOKEN = os.getenv("ZENDESK_TOKEN")
 
 DB_NAME = 'zendesk_tickets.db'
 
-def post_zendesk_comment(ticket_id, comment, new_tag="us_number_order_ai_automation"):
+def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_tag="us_number_order_ai_automation",prefix=None):
     url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/{ticket_id}.json"
     auth = (f"{ZENDESK_EMAIL}/token", ZENDESK_TOKEN)
     headers = {
@@ -40,24 +43,81 @@ def post_zendesk_comment(ticket_id, comment, new_tag="us_number_order_ai_automat
         return
 
     # Step 2: Update ticket with comment + updated tags
-    payload = {
+    internal_payload = {
         "ticket": {
             "comment": {
-                "body": comment,
+                "body": internal_comment,
                 "public": False
             },
-            "tags": existing_tags
+            "status": "hold",
+            "tags": existing_tags,
+            "custom_fields" : [
+                {
+                    "id" : 360035634992, #carrier ticket
+                    "value" : "carrier_ticket_no"
+                },
+                {
+                    "id" : 38226917914265, #Phone numbers type(internal)
+                    "value" : "us_longcodes"
+                },
+                {
+                    "id" : 38227031586841, #Us/ca longcodes type
+                    "value" : "number_order__"
+                },
+                {
+                    "id" : 360035174572, #Prefix
+                    "value" : prefix
+                }
+            ]
         }
     }
 
     try:
-        put_response = requests.put(url, json=payload, auth=auth, headers=headers)
+        put_response = requests.put(url, json=internal_payload, auth=auth, headers=headers)
         if put_response.status_code in [200, 201]:
             print(f"✅ Posted comment and updated tags on Zendesk ticket #{ticket_id}")
         else:
             print(f"❌ Failed to update Zendesk ticket: {put_response.status_code} - {put_response.text}")
     except Exception as e:
         print(f"❌ Error updating Zendesk ticket: {e}")
+
+    #Step 3: Post public comment if provided
+    if public_comment:
+        public_payload = {
+            "ticket": {
+                "comment": {
+                    "body": public_comment,
+                    "public": True
+                },
+                "tags": existing_tags,
+                "custom_fields" : [
+                {
+                    "id" : 360035634992, #carrier ticket
+                    "value" : "carrier_ticket_no"
+                },
+                {
+                    "id" : 38226917914265, #Phone numbers type(internal)
+                    "value" : "us_longcodes"
+                },
+                {
+                    "id" : 38227031586841, #Us/ca longcodes type
+                    "value" : "number_order__"
+                },
+                {
+                    "id" : 360035174572, #Prefix
+                    "value" : prefix
+                }
+            ]
+            }
+        }
+        try:
+            response = requests.put(url, json=public_payload, auth=auth, headers=headers)
+            if response.status_code in [200, 201]:
+                print(f"✅ Public comment posted to Zendesk ticket #{ticket_id}")
+            else:
+                print(f"❌ Failed to post public comment: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"❌ Error posting public comment: {e}")
 
 
 
@@ -70,13 +130,14 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS tickets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticket_id INTEGER UNIQUE,
-            subject TEXT,
-            body TEXT
-        )
-    ''')
+            CREATE TABLE IF NOT EXISTS tickets (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   ticket_id INTEGER UNIQUE,
+                   subject TEXT,
+                   body TEXT,
+                   processed INTEGER DEFAULT 0
+            )
+        ''')
     conn.commit()
     conn.close()
 
@@ -86,6 +147,8 @@ def init_db():
 # -------------------------
 @app.route('/zendesk-webhook', methods=['POST'])
 def zendesk_webhook():
+    request_id = str(uuid.uuid4())
+    print(f"🔁 Webhook request ID: {request_id}")
     print("\n📥 New webhook hit!")
     print("🔎 Headers:", dict(request.headers))
     print("📦 Raw Body:", request.data.decode())
@@ -104,6 +167,12 @@ def zendesk_webhook():
         ticket_id = ticket.get("id")
         subject = ticket.get("subject", "")
         description = ticket.get("description", "")
+        ticket_status = ticket.get("status", "")
+
+        if ticket_status.lower() == "hold":
+            print(f"🚫 Skipping ticket #{ticket_id} - status is '{ticket_status}'")
+            return jsonify({"status": "ignored"}), 200
+
     else:
         # Handle flat test payload
         ticket_id = data.get("ticket_id")
@@ -114,7 +183,16 @@ def zendesk_webhook():
         print("❌ Missing ticket_id")
         return jsonify({"error": "Missing ticket ID"}), 400
 
+    # ✅ Check if already processed
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT processed FROM tickets WHERE ticket_id = ?", (ticket_id,))
+    row = cursor.fetchone()
+    conn.close()
 
+    if row and row[0] == 1:
+        print(f"⛔ Ticket #{ticket_id} already processed. Skipping.")
+        return jsonify({"status": "already processed"}), 200
     # Insert into DB
     try:
         db_path = os.path.abspath(DB_NAME)
@@ -135,22 +213,32 @@ def zendesk_webhook():
         #Using ZD description to run the flow
         try:
             print("Triggering assistant flow in real time")
-            ai_output = handle_user_request(description)
+            ai_output = handle_user_request(description,ticket_id=ticket_id)
             if ai_output:
                 #update the ticket with assitant output
+                ai_output_str = json.dumps(ai_output, indent= 2)
                 conn = sqlite3.connect(DB_NAME)
                 cursor = conn.cursor()
                 cursor.execute('''
                             UPDATE tickets
                                SET body = body || "\n\n ---- Assistant response: \n" || ?
                                WHERE ticket_id = ?
-                    ''', (ai_output, ticket_id))
+                    ''', (ai_output_str, ticket_id))
                 conn.commit()
                 conn.close()
                 print("Assitant output saved to DB.")
 
+                conn = sqlite3.connect(DB_NAME)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE tickets SET processed = 1 WHERE ticket_id = ?", (ticket_id,))
+                conn.commit()
+                conn.close()
+
+
             #Post internal comment to zendesk
-            post_zendesk_comment(ticket_id, ai_output)
+            post_zendesk_comment(ticket_id, internal_comment= ai_output["internal"], public_comment=ai_output["public"], prefix=ai_output["prefix"])
+            time.sleep(30) #pausing the execution to prevent the ZD trigger to run multiple times
+            
 
         except Exception as e:
             print(f"error during assistant handling {e}")
