@@ -16,7 +16,7 @@ ZENDESK_TOKEN = os.getenv("ZENDESK_TOKEN")
 
 DB_NAME = '/data/zendesk_tickets.db'
 
-def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_tag="us_number_order_ai_automation",prefix=None):
+def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_tag=["us_number_order_ai_automation", "support_automation"],prefix=None):
     url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/{ticket_id}.json"
     auth = (f"{ZENDESK_EMAIL}/token", ZENDESK_TOKEN)
     headers = {
@@ -49,7 +49,7 @@ def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_
                 "body": internal_comment,
                 "public": False
             },
-            "status": "hold",
+            "status": "open",
             "tags": existing_tags,
             "custom_fields" : [
                 {
