@@ -194,3 +194,4 @@ zd_number_parser.py
 .DS_Store
 .env
 deep_dive/
+backup.tar.gz
