@@ -5,6 +5,7 @@ import os
 import time
 import json
 import uuid
+import logging
 from main import handle_user_request, run_assistant_with_input, search_iq_inventory, search_plivo_numbers, order_reserved_numbers, retrieve_reserved_iq
 
 app = Flask(__name__)
@@ -16,6 +17,18 @@ ZENDESK_TOKEN = os.getenv("ZENDESK_TOKEN")
 
 DB_NAME = '/data/zendesk_tickets.db'
 
+# Configure logging
+LOG_FILE = "/data/us_ca_lc.log"
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_tag=["us_number_order_ai_automation", "support_automation"],prefix=None):
     url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/{ticket_id}.json"
     auth = (f"{ZENDESK_EMAIL}/token", ZENDESK_TOKEN)
@@ -26,8 +39,10 @@ def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_
     # Step 1: Fetch existing ticket tags
     try:
         get_response = requests.get(url, auth=auth, headers=headers)
+        logger.info(f"Zendesk response: {get_response}")
         if get_response.status_code not in [200, 201]:
             print(f"⚠️ Failed to fetch ticket details: {get_response.status_code}")
+            logger.infoprint(f"⚠️ Failed to fetch ticket details: {get_response.status_code}")
             return
 
         ticket_data = get_response.json().get("ticket", {})
@@ -36,7 +51,7 @@ def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_
 
         # Add new tag if not already present
         if new_tag not in existing_tags:
-            existing_tags.append(new_tag)
+            existing_tags.extend(new_tag)
 
     except Exception as e:
         print(f"❌ Error fetching ticket tags: {e}")
@@ -76,10 +91,13 @@ def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_
         put_response = requests.put(url, json=internal_payload, auth=auth, headers=headers)
         if put_response.status_code in [200, 201]:
             print(f"✅ Posted comment and updated tags on Zendesk ticket #{ticket_id}")
+            logger.info(f"✅ Posted comment and updated tags on Zendesk ticket #{ticket_id}")
         else:
             print(f"❌ Failed to update Zendesk ticket: {put_response.status_code} - {put_response.text}")
+            logger.info(f"❌ Failed to update Zendesk ticket: {put_response.status_code} - {put_response.text}")
     except Exception as e:
         print(f"❌ Error updating Zendesk ticket: {e}")
+        logger.info(f"❌ Error updating Zendesk ticket: {e}")
 
     #Step 3: Post public comment if provided
     if public_comment:
@@ -114,10 +132,13 @@ def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_
             response = requests.put(url, json=public_payload, auth=auth, headers=headers)
             if response.status_code in [200, 201]:
                 print(f"✅ Public comment posted to Zendesk ticket #{ticket_id}")
+                logger.info(f"✅ Public comment posted to Zendesk ticket #{ticket_id}")
             else:
                 print(f"❌ Failed to post public comment: {response.status_code} - {response.text}")
+                logger.info(f"❌ Failed to post public comment: {response.status_code} - {response.text}")
         except Exception as e:
             print(f"❌ Error posting public comment: {e}")
+            logger.info(f"❌ Error posting public comment: {e}")
 
 
 
