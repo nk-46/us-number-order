@@ -21,7 +21,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PROJECT_ID = os.getenv("OPENAI_PROJECT_ID")
 openai_client = OpenAI(api_key=OPENAI_API_KEY, project=PROJECT_ID)
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
-THREAD_ID = os.getenv("OPENAI_THREAD_ID")
+THREAD_ID = os.getenv("OPENAI_THREAD_ID") 
 iq_trunk_group = os.getenv("IQ_TRUNK_GROUP")
 
 # Plivo
@@ -50,7 +50,7 @@ iq_headers = {
 }
 
 # Configure logging
-LOG_FILE = "/data/us_ca_lc.log"
+LOG_FILE = "us_ca_lc.log" #"/data/us_ca_lc.log"
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -264,10 +264,27 @@ def handle_user_request(user_input,ticket_id=None):
 
     try:
         response_data = json.loads(ai_response)
-        numbers_list = response_data.get("numbers", [])
+
+        # 🚫 Skip if not a number request
+        if response_data.get("is_number_request", "").lower() != "yes":
+            logger.info("🛑 Skipping processing: is_number_request is not 'Yes'")
+            return {
+                "internal": full_output + "\nAssistant indicated this is not a number request.",
+                "public": "This request does not appear to be related to number provisioning.",
+                "prefix": ""
+            }
+
+        # ✅ Filter only Long code type numbers
+        numbers_list = [
+            entry for entry in response_data.get("numbers", [])
+            if entry.get("type", "").lower() == "long code"
+        ]
+        logger.info(f"📋 Filtered numbers to process: {json.dumps(numbers_list, indent=2)}")
+
     except Exception as e:
         print(f"❌ Failed to parse AI response as JSON: {e}")
         return f"{full_output} Failed to extract number patterns from assistant's response"
+
     results_text = ""
     searched_keys = set()
     
@@ -366,6 +383,7 @@ def handle_user_request(user_input,ticket_id=None):
                 batch = iq_response.get("tnResult", [])
                 if batch:
                     iq_ordered_summary[search_key] = len(batch)
+                    iq_backorder_summary[search_key] = remaining_quantity
                 total_results.extend(batch)
 
                 if not batch or len(batch) < page_size:
@@ -381,9 +399,9 @@ def handle_user_request(user_input,ticket_id=None):
                     print(f" - {tn['telephoneNumber']} ({tn['city']}, {tn['province']})")
                     results_text += f" - {tn['telephoneNumber']} ({tn['city']}, {tn['province']})\n"
 
-                retrieve_payload = {"privatekey": iq_private_key}
-                reserved_data = retrieve_reserved_iq(payload=retrieve_payload)
-                reserved_tns = reserved_data.get("reservedTns", [])
+                #retrieve_payload = {"privatekey": iq_private_key}
+                #reserved_data = retrieve_reserved_iq(payload=retrieve_payload)
+                reserved_tns = total_results[:quantity]
                 print(f"Currently reserved numbers:")
                 results_text += f"\nCurrently reserved numbers:\n"
                 for tn in reserved_tns:
@@ -401,7 +419,6 @@ def handle_user_request(user_input,ticket_id=None):
                 # 🔁 Backorder remaining quantity, if needed
                 if len(total_results) < quantity:
                     remaining_quantity = quantity - len(total_results)
-                    iq_backorder_summary[search_key] = remaining_quantity
                     print(f"⚠️ Only {len(total_results)} found. Placing backorder for remaining {remaining_quantity}")
                     backorder_response = place_inteliquent_backorder(
                         npa=search_key,
@@ -412,6 +429,8 @@ def handle_user_request(user_input,ticket_id=None):
                     order_id = backorder_response.get("orderId") or backorder_response.get("tnOrderId", "N/A")
                     logger.info(f"📦 Backorder placed for remaining. Order ID: {order_id}")
                     results_text += f"\n📦 Backorder placed for remaining {remaining_quantity}. Order ID: {order_id}\n"
+                    logger.info(f"📋 Final Backorder Summary: {json.dumps(iq_backorder_summary, indent=2)}")
+
 
         except Exception as e:
             print(f"⚠️ Error searching Inteliquent: {e}")
@@ -420,7 +439,7 @@ def handle_user_request(user_input,ticket_id=None):
     public_text = "Hello Team,\n\n"
 
     if plivo_summary:
-        plivo_parts = [f"{ac} ({cnt})" for ac, cnt in plivo_summary.items()]
+        plivo_parts = [f"{ac}" for ac, cnt in plivo_summary.items()]
         public_text += (
             "We found numbers via Plivo for the following area codes: "
             + ", ".join(plivo_parts)
@@ -428,7 +447,7 @@ def handle_user_request(user_input,ticket_id=None):
         )
 
     if iq_ordered_summary:
-        order_parts = [f"{ac} ({cnt})" for ac, cnt in iq_ordered_summary.items()]
+        order_parts = [f"{ac}" for ac, cnt in iq_ordered_summary.items()]
         public_text += (
             "We successfully ordered numbers from our carrier for these area codes: "
             + ", ".join(order_parts)
@@ -436,7 +455,7 @@ def handle_user_request(user_input,ticket_id=None):
         )
 
     if iq_backorder_summary:
-        bo_parts = [f"{ac} ({cnt})" for ac, cnt in iq_backorder_summary.items()]
+        bo_parts = [f"{ac}" for ac, cnt in iq_backorder_summary.items()]
         public_text += (
             "Due to limited inventory, we placed backorder requests for the following area codes: "
             + ", ".join(bo_parts)
@@ -454,11 +473,7 @@ def handle_user_request(user_input,ticket_id=None):
 
 if __name__ == "__main__":
     USER_INPUT = """
-#Hello Below are the quantity and the area codes of the required numbers. Add them to our account.
-25- 360
-4 - 216
-8 - 813
-11 - 915
+#Need numbers for 813 area code. Please add each of the number.
 
 """
     handle_user_request(USER_INPUT,ticket_id=None)

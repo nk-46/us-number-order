@@ -42,7 +42,7 @@ def post_zendesk_comment(ticket_id, internal_comment, public_comment= None, new_
         logger.info(f"Zendesk response: {get_response}")
         if get_response.status_code not in [200, 201]:
             print(f"⚠️ Failed to fetch ticket details: {get_response.status_code}")
-            logger.infoprint(f"⚠️ Failed to fetch ticket details: {get_response.status_code}")
+            logger.info(f"⚠️ Failed to fetch ticket details: {get_response.status_code}")
             return
 
         ticket_data = get_response.json().get("ticket", {})
@@ -234,7 +234,8 @@ def zendesk_webhook():
         #Using ZD description to run the flow
         try:
             print("Triggering assistant flow in real time")
-            ai_output = handle_user_request(description,ticket_id=ticket_id)
+            full_prompt = f"{subject.strip()}\n\n{description.strip()}"
+            ai_output = handle_user_request(full_prompt,ticket_id=ticket_id)
             if ai_output:
                 #update the ticket with assitant output
                 ai_output_str = json.dumps(ai_output, indent= 2)
