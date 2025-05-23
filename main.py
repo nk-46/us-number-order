@@ -257,6 +257,7 @@ def handle_user_request(user_input,ticket_id=None):
     plivo_summary = {}
     iq_ordered_summary = {}
     iq_backorder_summary = {}
+    ordered_number_details = {}
 
     if not ai_response:
         print("No AI response found.")
@@ -355,7 +356,7 @@ def handle_user_request(user_input,ticket_id=None):
             if iq_response.get("statusCode") == "430" or not iq_response.get("tnResult"):
                 print(f"❌ No inventory in Inteliquent. Placing full backorder for {quantity}")
                 backorder_response = place_inteliquent_backorder(
-                    npa=search_key,
+                    npa=area_code,
                     trunk_group=iq_trunk_group,
                     ticket_id=ticket_id,
                     quantity=quantity
@@ -363,6 +364,8 @@ def handle_user_request(user_input,ticket_id=None):
                 order_id = backorder_response.get("orderId") or backorder_response.get("tnOrderId", "N/A")
                 logger.info(f"📦 Full backorder placed. Order ID: {order_id}")
                 results_text += f"\n📦 Backorder placed for full quantity. Order ID: {order_id}\n"
+
+                iq_backorder_summary[area_code] = quantity
 
                 continue  # Skip rest of loop
 
@@ -383,7 +386,6 @@ def handle_user_request(user_input,ticket_id=None):
                 batch = iq_response.get("tnResult", [])
                 if batch:
                     iq_ordered_summary[search_key] = len(batch)
-                    iq_backorder_summary[search_key] = remaining_quantity
                 total_results.extend(batch)
 
                 if not batch or len(batch) < page_size:
@@ -402,15 +404,19 @@ def handle_user_request(user_input,ticket_id=None):
                 #retrieve_payload = {"privatekey": iq_private_key}
                 #reserved_data = retrieve_reserved_iq(payload=retrieve_payload)
                 reserved_tns = total_results[:quantity]
-                print(f"Currently reserved numbers:")
-                results_text += f"\nCurrently reserved numbers:\n"
-                for tn in reserved_tns:
-                    print(f": - {tn.get('telephoneNumber')}")
-                    results_text += f": - {tn.get('telephoneNumber')}\n"
+                # Store ordered numbers for this area code
+                ordered_number_details[area_code] = [tn.get("telephoneNumber") for tn in reserved_tns]
+                print(f"\n Ordered numbers for {area_code}")
+                results_text += f"\nOrdered numbers for {area_code}\n"
+                for tn in ordered_number_details.get(area_code,[]):
+                    print(f": - {tn}\n")
+                    results_text += f": - {tn}\n"
 
                 try:
                     order_response = order_reserved_numbers(reserved_tns, iq_private_key, iq_trunk_group)
                     print("Order Response:")
+                    iq_ordered_summary[area_code] = len(reserved_tns)
+                    logger.info(f"✅ Ordered {len(reserved_tns)} numbers for area code {area_code}")
                     print(json.dumps(order_response, indent=5))
                     results_text += f"\n\n{order_response}"
                 except Exception as e:
@@ -430,6 +436,8 @@ def handle_user_request(user_input,ticket_id=None):
                     logger.info(f"📦 Backorder placed for remaining. Order ID: {order_id}")
                     results_text += f"\n📦 Backorder placed for remaining {remaining_quantity}. Order ID: {order_id}\n"
                     logger.info(f"📋 Final Backorder Summary: {json.dumps(iq_backorder_summary, indent=2)}")
+
+                    iq_backorder_summary[area_code] = remaining_quantity
 
 
         except Exception as e:
@@ -453,6 +461,11 @@ def handle_user_request(user_input,ticket_id=None):
             + ", ".join(order_parts)
             + ".\n\n"
         )
+        for ac, numbers in ordered_number_details.items():
+            public_text += f"Here are the numbers provisioned for the area code {ac}: \n"
+            for n in numbers:
+                public_text += f" - {n}\n"
+            public_text += "\n"
 
     if iq_backorder_summary:
         bo_parts = [f"{ac}" for ac, cnt in iq_backorder_summary.items()]
@@ -465,6 +478,10 @@ def handle_user_request(user_input,ticket_id=None):
 
     print(f"Public text: {public_text}")
     print(f"Prefix: {search_key}")
+    print(f"Ordered numbers: {ordered_number_details}")
+    internal_comment = full_output + results_text.strip()
+    print(f"Internal comment: {internal_comment}")
+    print(f"Backorder response: {backorder_response}")
     return {
         "internal" : full_output + results_text.strip(),
         "public" : public_text,
@@ -473,7 +490,7 @@ def handle_user_request(user_input,ticket_id=None):
 
 if __name__ == "__main__":
     USER_INPUT = """
-#Need numbers for 813 area code. Please add each of the number.
+#Need numbers for 813 area code. Please add one number.
 
 """
     handle_user_request(USER_INPUT,ticket_id=None)
