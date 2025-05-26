@@ -235,37 +235,50 @@ def zendesk_webhook():
         try:
             print("Triggering assistant flow in real time")
             full_prompt = f"{subject.strip()}\n\n{description.strip()}"
-            ai_output = handle_user_request(full_prompt,ticket_id=ticket_id)
-            if ai_output:
-                #update the ticket with assitant output
-                ai_output_str = json.dumps(ai_output, indent= 2)
-                conn = sqlite3.connect(DB_NAME)
-                cursor = conn.cursor()
-                cursor.execute('''
-                            UPDATE tickets
-                               SET body = body || "\n\n ---- Assistant response: \n" || ?
-                               WHERE ticket_id = ?
-                    ''', (ai_output_str, ticket_id))
-                conn.commit()
-                conn.close()
-                print("Assitant output saved to DB.")
+            ai_output = handle_user_request(full_prompt, ticket_id=ticket_id)
 
-                conn = sqlite3.connect(DB_NAME)
-                cursor = conn.cursor()
-                cursor.execute("UPDATE tickets SET processed = 1 WHERE ticket_id = ?", (ticket_id,))
-                conn.commit()
-                conn.close()
+            # 🛑 Skip update if assistant says not a number request
+            if ai_output.get("skip_update", False):
+                print(f"Assistant flagged {ticket_id} as not a number request. Skipping update")
+                return jsonify({"status": "ignored - not a number request"}), 200
+            
+            # ✅ Proceed with update
+            ai_output_str = json.dumps(ai_output, indent=2)
+            
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('''
+                           UPDATE tickets
+                           SET body = body || "\n\n ---- Assistant response: \n" || ?
+                           WHERE ticket_id = ?
+                           ''', (ai_output_str, ticket_id))
+            conn.commit()
+            conn.close()
+            print("Assistant output saved to DB.")
+            
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE tickets SET processed = 1 WHERE ticket_id = ?", (ticket_id,))
+            conn.commit()
+            conn.close()
+            
+            # Post comments to Zendesk
+            post_zendesk_comment(
+                ticket_id,
+                internal_comment=ai_output["internal"],
+                public_comment=ai_output["public"],
+                prefix=ai_output["prefix"]
+                )
+            time.sleep(30)
+            return jsonify({"status": "success"}), 200
 
-
-            #Post internal comment to zendesk
-            post_zendesk_comment(ticket_id, internal_comment= ai_output["internal"], public_comment=ai_output["public"], prefix=ai_output["prefix"])
-            time.sleep(30) #pausing the execution to prevent the ZD trigger to run multiple times
             
 
         except Exception as e:
             print(f"error during assistant handling {e}")
             return jsonify({"status" : "ticket stored, assistant failed"}), 200
         return jsonify({"status": "success"}), 200
+    
 
     except Exception as e:
         print("❌ DB error:", e)

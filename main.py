@@ -270,6 +270,7 @@ def handle_user_request(user_input,ticket_id=None):
         if response_data.get("is_number_request", "").lower() != "yes":
             logger.info("🛑 Skipping processing: is_number_request is not 'Yes'")
             return {
+                "skip_update": True,
                 "internal": full_output + "\nAssistant indicated this is not a number request.",
                 "public": "This request does not appear to be related to number provisioning.",
                 "prefix": ""
@@ -447,7 +448,7 @@ def handle_user_request(user_input,ticket_id=None):
     public_text = "Hello Team,\n\n"
 
     if plivo_summary:
-        plivo_parts = [f"{ac}" for ac, cnt in plivo_summary.items()]
+        plivo_parts = [f"{ac} {cnt}" for ac, cnt in plivo_summary.items()]
         public_text += (
             "We found numbers via Plivo for the following area codes: "
             + ", ".join(plivo_parts)
@@ -455,7 +456,7 @@ def handle_user_request(user_input,ticket_id=None):
         )
 
     if iq_ordered_summary:
-        order_parts = [f"{ac}" for ac, cnt in iq_ordered_summary.items()]
+        order_parts = [f"{ac} {cnt}" for ac, cnt in iq_ordered_summary.items()]
         public_text += (
             "We successfully ordered numbers from our carrier for these area codes: "
             + ", ".join(order_parts)
@@ -468,7 +469,7 @@ def handle_user_request(user_input,ticket_id=None):
             public_text += "\n"
 
     if iq_backorder_summary:
-        bo_parts = [f"{ac}" for ac, cnt in iq_backorder_summary.items()]
+        bo_parts = [f"{ac} {cnt}" for ac, cnt in iq_backorder_summary.items()]
         public_text += (
             "Due to limited inventory, we placed backorder requests for the following area codes: "
             + ", ".join(bo_parts)
@@ -483,6 +484,7 @@ def handle_user_request(user_input,ticket_id=None):
     print(f"Internal comment: {internal_comment}")
     print(f"Backorder response: {backorder_response}")
     return {
+        "skip_update": False,
         "internal" : full_output + results_text.strip(),
         "public" : public_text,
         "prefix" : str(search_key)
