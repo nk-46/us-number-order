@@ -113,7 +113,7 @@ def post_zendesk_comment(ticket_id, internal_comment, public_comment=None, new_t
         try:
             public_payload = {
                 "ticket": {
-                    "comment": {"body": public_comment, "public": True},
+                    "comment": {"body": public_comment, "public": False},
                     "tags": updated_tags,
                     "custom_fields": shared_custom_fields
                 }
