@@ -21,7 +21,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PROJECT_ID = os.getenv("OPENAI_PROJECT_ID")
 openai_client = OpenAI(api_key=OPENAI_API_KEY, project=PROJECT_ID)
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
-THREAD_ID = os.getenv("OPENAI_THREAD_ID") 
 iq_trunk_group = os.getenv("IQ_TRUNK_GROUP")
 
 # Plivo
@@ -213,22 +212,23 @@ def search_plivo_numbers(numbers, number_with_area_code, area_code, region, type
 
 # --------------------------- OPENAI ASSISTANT FLOW ---------------------------
 
-def run_assistant_with_input(assistant_id, thread_id, user_message):
+def run_assistant_with_input(assistant_id, user_message):
     print("📨 Sending user message...")
+    thread = openai_client.beta.threads.create()
     openai_client.beta.threads.messages.create(
-        thread_id=thread_id,
+        thread_id=thread.id,
         role="user",
         content=user_message
     )
 
     print("⚙️  Running assistant...")
     run = openai_client.beta.threads.runs.create(
-        thread_id=thread_id,
-        assistant_id=assistant_id
+        thread_id=thread.id,
+        assistant_id=ASSISTANT_ID
     )
 
     while True:
-        run_status = openai_client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+        run_status = openai_client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
         if run_status.status == "completed":
             break
         elif run_status.status in ["failed", "cancelled", "expired"]:
@@ -236,7 +236,7 @@ def run_assistant_with_input(assistant_id, thread_id, user_message):
         time.sleep(1)
 
     print("📬 Fetching assistant response...")
-    messages = openai_client.beta.threads.messages.list(thread_id=thread_id, run_id=run.id)
+    messages = openai_client.beta.threads.messages.list(thread_id=thread.id)
     
     for msg in reversed(messages.data):
         if msg.role == "assistant":
@@ -252,7 +252,7 @@ def run_assistant_with_input(assistant_id, thread_id, user_message):
 
 
 def handle_user_request(user_input,ticket_id=None):
-    ai_response = run_assistant_with_input(ASSISTANT_ID, THREAD_ID, user_input)
+    ai_response = run_assistant_with_input(ASSISTANT_ID, user_input)
     full_output = f"Assitant Response:\n{ai_response}\n\n"
     plivo_summary = {}
     iq_ordered_summary = {}
@@ -349,13 +349,14 @@ def handle_user_request(user_input,ticket_id=None):
             "quantity" : quantity,
             "reserve": "Y"
         }
-        
+        backorder_response = None
         try:
             iq_response = search_iq_inventory(iq_payload)
 
             # === CASE 1: No results at all ===
             if iq_response.get("statusCode") == "430" or not iq_response.get("tnResult"):
                 print(f"❌ No inventory in Inteliquent. Placing full backorder for {quantity}")
+                logger.info(f"❌ No inventory in Inteliquent. Placing full backorder for {quantity}")
                 backorder_response = place_inteliquent_backorder(
                     npa=area_code,
                     trunk_group=iq_trunk_group,
@@ -492,7 +493,10 @@ def handle_user_request(user_input,ticket_id=None):
 
 if __name__ == "__main__":
     USER_INPUT = """
-#Need numbers for 813 area code. Please add one number.
+Hi Team,
 
+Do you have any area code 201 numbers available that end in 4673?
+
+Thank You!
 """
     handle_user_request(USER_INPUT,ticket_id=None)
