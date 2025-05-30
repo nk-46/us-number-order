@@ -39,7 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TICKET_TAGS = ["support-automation", "us_number_order_ai_automation"]
+TICKET_TAGS = ["support_automation", "us_number_order_ai_automation"]
 
 # -------------------------
 # 🔖 Tag Ticket Immediately
