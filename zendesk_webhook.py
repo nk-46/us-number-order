@@ -6,6 +6,9 @@ import time
 import json
 import uuid
 import logging
+from filelock import FileLock, Timeout
+import redis
+
 from main import (
     handle_user_request,
     run_assistant_with_input,
@@ -24,6 +27,11 @@ ZENDESK_SUBDOMAIN = os.getenv("ZENDESK_SUBDOMAIN")
 ZENDESK_EMAIL = os.getenv("ZENDESK_EMAIL")
 ZENDESK_TOKEN = os.getenv("ZENDESK_TOKEN")
 DB_NAME = '/data/zendesk_tickets.db'
+
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
+
 
 # -------------------------
 # 📋 Logging Setup
@@ -154,7 +162,6 @@ def zendesk_webhook():
 
     try:
         data = request.get_json(force=True)
-        logger.debug(f"📦 Payload: {data}")
     except Exception as e:
         return jsonify({"error": "Invalid JSON"}), 400
 
@@ -169,66 +176,73 @@ def zendesk_webhook():
     if status == "hold":
         return jsonify({"status": "ignored - on hold"}), 200
 
-    # Check DB to prevent reprocessing
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT processed FROM tickets WHERE ticket_id = ?", (ticket_id,))
-    row = cursor.fetchone()
-    conn.close()
+    ticket_lock_path = f"/tmp/ticket_{ticket_id}.lock"
+    file_lock = FileLock(ticket_lock_path, timeout=1)
 
-    if row and row[0] == 1:
-        logger.info(f"⛔ Already processed ticket #{ticket_id}")
-        return jsonify({"status": "already processed"}), 200
+    redis_lock_key = f"lock:ticket:{ticket_id}"
+    redis_lock = redis_client.lock(redis_lock_key, timeout=30, blocking_timeout=1)
 
     try:
-        # Write to DB
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR IGNORE INTO tickets (ticket_id, subject, body)
-            VALUES (?, ?, ?)
-        ''', (ticket_id, subject, description))
-        conn.commit()
-        conn.close()
-        logger.info(f"💾 Ticket #{ticket_id} written to DB")
+        with file_lock, redis_lock:
+            logger.info(f"🔐 Acquired file + redis lock for ticket {ticket_id}")
 
-        # Tag immediately to block further triggers
-        tag_ticket_immediately(ticket_id)
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("SELECT processed FROM tickets WHERE ticket_id = ?", (ticket_id,))
+            row = cursor.fetchone()
+            conn.close()
 
-        # Run assistant
-        prompt = f"{subject.strip()}\n\n{description.strip()}"
-        ai_output = handle_user_request(prompt, ticket_id=ticket_id)
+            if row and row[0] == 1:
+                logger.info(f"⛔ Already processed ticket #{ticket_id}")
+                return jsonify({"status": "already processed"}), 200
 
-        if ai_output.get("skip_update"):
-            logger.info(f"🛑 Assistant skipped update for #{ticket_id}")
-            return jsonify({"status": "ignored - not a number request"}), 200
+            # DB insert
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR IGNORE INTO tickets (ticket_id, subject, body)
+                VALUES (?, ?, ?)
+            ''', (ticket_id, subject, description))
+            conn.commit()
+            conn.close()
 
-        # Store response in DB
-        ai_output_str = json.dumps(ai_output, indent=2)
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE tickets
-            SET body = body || "\n\n---- Assistant response: \n" || ?, processed = 1
-            WHERE ticket_id = ?
-        ''', (ai_output_str, ticket_id))
-        conn.commit()
-        conn.close()
+            tag_ticket_immediately(ticket_id)
 
-        # Post to Zendesk
-        post_zendesk_comment(
-            ticket_id,
-            internal_comment=ai_output["internal"],
-            public_comment=ai_output["public"],
-            prefix=ai_output["prefix"]
-        )
+            prompt = f"{subject.strip()}\n\n{description.strip()}"
+            ai_output = handle_user_request(prompt, ticket_id=ticket_id)
 
-        time.sleep(30)  # Delay to prevent back-to-back hits if needed
-        return jsonify({"status": "success"}), 200
+            if ai_output.get("skip_update"):
+                return jsonify({"status": "ignored - not a number request"}), 200
 
+            ai_output_str = json.dumps(ai_output, indent=2)
+
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE tickets
+                SET body = body || "\n\n---- Assistant response: \n" || ?, processed = 1
+                WHERE ticket_id = ?
+            ''', (ai_output_str, ticket_id))
+            conn.commit()
+            conn.close()
+
+            post_zendesk_comment(
+                ticket_id,
+                internal_comment=ai_output["internal"],
+                public_comment=ai_output["public"],
+                prefix=ai_output["prefix"]
+            )
+
+            time.sleep(30)
+            return jsonify({"status": "success"}), 200
+
+    except Timeout:
+        logger.warning(f"⏳ Ticket {ticket_id} already locked and being processed.")
+        return jsonify({"status": "skipped - lock held elsewhere"}), 200
     except Exception as e:
-        logger.exception(f"❌ Exception during webhook processing: {e}")
-        return jsonify({"status": "ticket stored, assistant failed"}), 200
+        logger.exception(f"❌ Error during processing: {e}")
+        return jsonify({"status": "error"}), 500
+
 
 # -------------------------
 # 🚀 App Runner
