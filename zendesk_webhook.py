@@ -206,13 +206,15 @@ def zendesk_webhook():
             conn.commit()
             conn.close()
 
-            tag_ticket_immediately(ticket_id)
-
             prompt = f"{subject.strip()}\n\n{description.strip()}"
             ai_output = handle_user_request(prompt, ticket_id=ticket_id)
 
             if ai_output.get("skip_update"):
+                logger.info(f"⏭️ Skipping tag update for ticket #{ticket_id} - not a number request")
                 return jsonify({"status": "ignored - not a number request"}), 200
+
+            # Only tag the ticket if it's a number request
+            tag_ticket_immediately(ticket_id)
 
             ai_output_str = json.dumps(ai_output, indent=2)
 
