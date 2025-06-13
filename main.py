@@ -358,7 +358,7 @@ def handle_user_request(user_input,ticket_id=None):
                 print(f"❌ No inventory in Inteliquent. Placing full backorder for {quantity}")
                 logger.info(f"❌ No inventory in Inteliquent. Placing full backorder for {quantity}")
                 backorder_response = place_inteliquent_backorder(
-                    npa=area_code,
+                    npa=search_key,
                     trunk_group=iq_trunk_group,
                     ticket_id=ticket_id,
                     quantity=quantity
@@ -367,58 +367,43 @@ def handle_user_request(user_input,ticket_id=None):
                 logger.info(f"📦 Full backorder placed. Order ID: {order_id}")
                 results_text += f"\n📦 Backorder placed for full quantity. Order ID: {order_id}\n"
 
-                iq_backorder_summary[area_code] = quantity
+                iq_backorder_summary[search_key] = quantity
 
                 continue  # Skip rest of loop
 
             # === CASE 2: Some results exist ===
-            total_results = []
-            page = 1
-            page_size = 10
+            # Modified to use a single request with exact quantity needed
+            iq_payload["pageSort"] = {
+                "property": "state",
+                "direction": "asc",
+                "page": 1,
+                "size": quantity  # Use the exact quantity needed
+            }
 
-            while len(total_results) < quantity:
-                iq_payload["pageSort"] = {
-                    "property": "state",
-                    "direction": "asc",
-                    "page": page,
-                    "size": min(page_size, quantity - len(total_results))
-                }
-
-                iq_response = search_iq_inventory(iq_payload)
-                batch = iq_response.get("tnResult", [])
-                if batch:
-                    iq_ordered_summary[search_key] = len(batch)
-                total_results.extend(batch)
-
-                if not batch or len(batch) < page_size:
-                    break
-                page += 1
-
-            # ✅ Found some results — order them
+            iq_response = search_iq_inventory(iq_payload)
+            total_results = iq_response.get("tnResult", [])
+            
             if total_results:
                 print(f"✅ Inteliquent results for {search_key}:")
                 results_text += f"\n\nInteliquent results for {search_key}:\n"
 
-                for tn in total_results[:quantity]:
+                for tn in total_results:
                     print(f" - {tn['telephoneNumber']} ({tn['city']}, {tn['province']})")
                     results_text += f" - {tn['telephoneNumber']} ({tn['city']}, {tn['province']})\n"
 
-                #retrieve_payload = {"privatekey": iq_private_key}
-                #reserved_data = retrieve_reserved_iq(payload=retrieve_payload)
-                reserved_tns = total_results[:quantity]
                 # Store ordered numbers for this area code
-                ordered_number_details[area_code] = [tn.get("telephoneNumber") for tn in reserved_tns]
-                print(f"\n Ordered numbers for {area_code}")
-                results_text += f"\nOrdered numbers for {area_code}\n"
-                for tn in ordered_number_details.get(area_code,[]):
+                ordered_number_details[search_key] = [tn.get("telephoneNumber") for tn in total_results]
+                print(f"\n Ordered numbers for {search_key}")
+                results_text += f"\nOrdered numbers for {search_key}\n"
+                for tn in ordered_number_details.get(search_key,[]):
                     print(f": - {tn}\n")
                     results_text += f": - {tn}\n"
 
                 try:
-                    order_response = order_reserved_numbers(reserved_tns, iq_private_key, iq_trunk_group)
+                    order_response = order_reserved_numbers(total_results, iq_private_key, iq_trunk_group)
                     print("Order Response:")
-                    iq_ordered_summary[area_code] = len(reserved_tns)
-                    logger.info(f"✅ Ordered {len(reserved_tns)} numbers for area code {area_code}")
+                    iq_ordered_summary[search_key] = len(total_results)
+                    logger.info(f"✅ Ordered {len(total_results)} numbers for area code {area_code}")
                     print(json.dumps(order_response, indent=5))
                     results_text += f"\n\n{order_response}"
                 except Exception as e:
@@ -439,7 +424,7 @@ def handle_user_request(user_input,ticket_id=None):
                     results_text += f"\n📦 Backorder placed for remaining {remaining_quantity}. Order ID: {order_id}\n"
                     logger.info(f"📋 Final Backorder Summary: {json.dumps(iq_backorder_summary, indent=2)}")
 
-                    iq_backorder_summary[area_code] = remaining_quantity
+                    iq_backorder_summary[search_key] = remaining_quantity
 
 
         except Exception as e:
@@ -474,7 +459,7 @@ def handle_user_request(user_input,ticket_id=None):
         public_text += (
             "Due to limited inventory, we placed backorder requests for the following area codes: "
             + ", ".join(bo_parts)
-            + ". We’ll notify you once they’re provisioned. Thank you!\n\n"
+            + ". We'll notify you once they're provisioned. Thank you!\n\n"
         )
 
 
