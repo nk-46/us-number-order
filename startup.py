@@ -14,15 +14,8 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv(override=True)
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/data/startup.log"),
-        logging.StreamHandler()
-    ]
-)
+# Configure logging - using logger instead of basicConfig to avoid conflicts
+# Main logging configuration is handled in zendesk_webhook.py
 logger = logging.getLogger(__name__)
 
 def signal_handler(signum, frame):

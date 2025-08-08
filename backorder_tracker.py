@@ -10,7 +10,8 @@ from dataclasses import dataclass
 
 from mcp_integration import InteliquentOrderTracker, process_completed_order
 
-# Configure logging
+# Configure logging - using logger instead of basicConfig to avoid conflicts
+# Main logging configuration is handled in zendesk_webhook.py
 logger = logging.getLogger(__name__)
 
 @dataclass
