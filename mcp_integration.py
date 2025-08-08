@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 load_dotenv()
 
-# Configure logging
+# Configure logging - using logger instead of basicConfig to avoid conflicts
+# Main logging configuration is handled in zendesk_webhook.py
 logger = logging.getLogger(__name__)
 
 def get_region_id_from_area_code(area_code: str) -> int:
@@ -99,6 +100,9 @@ class MCPNumberInventory:
         """
         Add numbers to inventory via MCP server
         
+        Processes numbers sequentially (one at a time) to avoid MCP server limitations.
+        The MCP server has a restriction that only allows one number per request.
+        
         Args:
             numbers: List of NumberInfo objects
             user_email: Email of the user requesting the addition
@@ -110,76 +114,98 @@ class MCPNumberInventory:
             Dict with success status and response details
         """
         try:
-            # Prepare numbers data
-            numbers_data = []
-            for number_info in numbers:
-                number_dict = {
-                    "number": number_info.number,
-                    "number_type": number_info.number_type,
-                    "voice_enabled": number_info.voice_enabled,
-                    "sms_enabled": number_info.sms_enabled,
-                    "mms_enabled": number_info.mms_enabled,
-                    "carrier_id": number_info.carrier_id,
-                    "carrier_tier_id": number_info.carrier_tier_id
-                }
-                
-                # Only include region_id if it's not None
-                if number_info.region_id is not None:
-                    number_dict["region_id"] = number_info.region_id
-                
-                numbers_data.append(number_dict)
+            successful_additions = []
+            failed_additions = []
             
-            # Prepare payload
-            payload = {
-                "query": "add numbers to inventory",
-                "raw_args": {
-                    "numbers": numbers_data,
-                    "user_email": user_email,
-                    "skip_number_testing": skip_number_testing,
-                    "skip_phone_number_profile_restrictions": skip_phone_number_profile_restrictions,
-                    "reason_skip_number_testing": reason_skip_number_testing
-                }
-            }
+            logger.info(f"📤 Processing {len(numbers)} numbers sequentially via MCP")
             
-            logger.info(f"📤 Sending {len(numbers)} numbers to MCP server")
-            logger.info(f"📋 Payload: {json.dumps(payload, indent=2)}")
+            # Process each number individually to avoid MCP server limitations
+            for i, number_info in enumerate(numbers, 1):
+                try:
+                    logger.info(f"🔄 Processing number {i}/{len(numbers)}: {number_info.number}")
+                    
+                    # Prepare single number data
+                    number_dict = {
+                        "number": number_info.number,
+                        "number_type": number_info.number_type,
+                        "voice_enabled": number_info.voice_enabled,
+                        "sms_enabled": number_info.sms_enabled,
+                        "mms_enabled": number_info.mms_enabled,
+                        "carrier_id": number_info.carrier_id,
+                        "carrier_tier_id": number_info.carrier_tier_id
+                    }
+                    
+                    # Only include region_id if it's not None
+                    if number_info.region_id is not None:
+                        number_dict["region_id"] = number_info.region_id
+                    
+                    # Prepare payload for single number
+                    payload = {
+                        "query": "add numbers to inventory",
+                        "raw_args": {
+                            "numbers": [number_dict],  # Single number in array
+                            "user_email": user_email,
+                            "skip_number_testing": skip_number_testing,
+                            "skip_phone_number_profile_restrictions": skip_phone_number_profile_restrictions,
+                            "reason_skip_number_testing": reason_skip_number_testing
+                        }
+                    }
+                    
+                    # Make request to MCP server for single number
+                    response = requests.post(
+                        self.mcp_url,
+                        json=payload,
+                        auth=(self.mcp_username, self.mcp_password),
+                        headers={'Content-Type': 'application/json'},
+                        timeout=30
+                    )
+                    
+                    if response.status_code == 200:
+                        response_data = response.json()
+                        logger.info(f"✅ Successfully added {number_info.number} to inventory")
+                        successful_additions.append(number_info.number)
+                    else:
+                        error_msg = f"HTTP {response.status_code}: {response.text}"
+                        logger.error(f"❌ Failed to add {number_info.number}: {error_msg}")
+                        failed_additions.append({
+                            'number': number_info.number,
+                            'error': error_msg
+                        })
+                        
+                except Exception as e:
+                    error_msg = f"Exception processing {number_info.number}: {str(e)}"
+                    logger.error(f"❌ {error_msg}")
+                    failed_additions.append({
+                        'number': number_info.number,
+                        'error': error_msg
+                    })
             
-            # Make request to MCP server
-            response = requests.post(
-                self.mcp_url,
-                json=payload,
-                auth=(self.mcp_username, self.mcp_password),
-                headers={'Content-Type': 'application/json'},
-                timeout=30
-            )
+            # Prepare final result
+            total_numbers = len(numbers)
+            successful_count = len(successful_additions)
+            failed_count = len(failed_additions)
             
-            logger.info(f"📥 MCP Response Status: {response.status_code}")
+            logger.info(f"📊 MCP processing complete: {successful_count}/{total_numbers} successful")
             
-            if response.status_code == 200:
-                response_data = response.json()
-                logger.info(f"✅ MCP request successful: {response_data}")
-                
+            if successful_count > 0:
                 return {
                     'success': True,
-                    'response': response_data,
-                    'numbers_added': [num.number for num in numbers]
+                    'response': {
+                        'total_processed': total_numbers,
+                        'successful_additions': successful_additions,
+                        'failed_additions': failed_additions
+                    },
+                    'numbers_added': successful_additions
                 }
             else:
-                logger.error(f"❌ MCP request failed: {response.status_code} - {response.text}")
                 return {
                     'success': False,
-                    'error': f"HTTP {response.status_code}: {response.text}",
-                    'status_code': response.status_code
+                    'error': f"All {total_numbers} numbers failed to add",
+                    'failed_additions': failed_additions
                 }
                 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Network error calling MCP server: {e}")
-            return {
-                'success': False,
-                'error': f"Network error: {str(e)}"
-            }
         except Exception as e:
-            logger.error(f"❌ Unexpected error calling MCP server: {e}")
+            logger.error(f"❌ Unexpected error in MCP processing: {e}")
             return {
                 'success': False,
                 'error': f"Unexpected error: {str(e)}"
@@ -190,8 +216,8 @@ class InteliquentOrderTracker:
     
     def __init__(self):
         self.base_url = os.getenv('INTELIQUENT_BASE_URL')
-        self.username = os.getenv('INTELIQUENT_USERNAME')
-        self.password = os.getenv('INTELIQUENT_PASSWORD')
+        self.username = os.getenv('IQ_PRIVATE_KEY')  # Use existing env var
+        self.password = os.getenv('IQ_SECRET_KEY')   # Use existing env var
         
         if not all([self.base_url, self.username, self.password]):
             logger.error("❌ Missing Inteliquent credentials in environment variables")
@@ -280,11 +306,14 @@ def process_completed_order(order_id: str, completed_numbers: List[str], user_em
         
         for number in completed_numbers:
             try:
-                # Extract area code from the number
-                if number.startswith('+1'):
-                    number_without_country = number[2:]  # Remove +1
-                elif number.startswith('1'):
-                    number_without_country = number[1:]  # Remove 1
+                # Ensure number is in proper format without + prefix
+                # Remove any existing + prefix
+                if number.startswith('+'):
+                    number = number[1:]  # Remove + prefix
+                
+                # Extract area code from the number (format: 1XXXXXXXXXX)
+                if number.startswith('1') and len(number) == 11:
+                    number_without_country = number[1:]  # Remove country code 1
                 else:
                     number_without_country = number
                 
@@ -362,14 +391,62 @@ def update_zendesk_with_mcp_status(ticket_id: str, mcp_result: Dict, numbers_add
         numbers_added: List of numbers that were added
     """
     try:
-        # This would integrate with your existing Zendesk update logic
-        # For now, just log the status
+        # Import Zendesk update function
+        from zendesk_webhook import post_zendesk_comment
+        
         if mcp_result.get('success'):
-            logger.info(f"✅ MCP integration successful for ticket {ticket_id}")
+            # Success case
+            successful_additions = mcp_result.get('response', {}).get('successful_additions', [])
+            total_processed = mcp_result.get('response', {}).get('total_processed', 0)
+            
+            internal_note = f"✅ MCP Integration Success\n\n"
+            internal_note += f"Total numbers processed: {total_processed}\n"
+            internal_note += f"Successfully added to inventory: {len(successful_additions)}\n"
+            
+            if successful_additions:
+                internal_note += f"Numbers added: {', '.join(successful_additions)}\n"
+            
             if numbers_added:
-                logger.info(f"📞 Numbers added to inventory: {numbers_added}")
+                internal_note += f"Original numbers: {', '.join(numbers_added)}\n"
+            
+            # Add raw MCP response
+            internal_note += f"\n📋 Raw MCP Server Response:\n"
+            internal_note += f"{json.dumps(mcp_result, indent=2)}\n"
+            
+            public_note = f"✅ Successfully added {len(successful_additions)} numbers to inventory via MCP integration."
+            
+            logger.info(f"✅ MCP integration successful for ticket {ticket_id}")
+            logger.info(f"📞 Numbers added to inventory: {successful_additions}")
+            
         else:
-            logger.error(f"❌ MCP integration failed for ticket {ticket_id}: {mcp_result.get('error')}")
+            # Failure case
+            error_msg = mcp_result.get('error', 'Unknown error')
+            failed_additions = mcp_result.get('response', {}).get('failed_additions', [])
+            
+            internal_note = f"❌ MCP Integration Failed\n\n"
+            internal_note += f"Error: {error_msg}\n"
+            
+            if failed_additions:
+                internal_note += f"Failed numbers: {len(failed_additions)}\n"
+                for failed in failed_additions[:5]:  # Show first 5 failures
+                    internal_note += f"- {failed.get('number', 'unknown')}: {failed.get('error', 'unknown error')}\n"
+            
+            # Add raw MCP response
+            internal_note += f"\n📋 Raw MCP Server Response:\n"
+            internal_note += f"{json.dumps(mcp_result, indent=2)}\n"
+            
+            public_note = f"❌ Failed to add numbers to inventory via MCP integration. Error: {error_msg}"
+            
+            logger.error(f"❌ MCP integration failed for ticket {ticket_id}: {error_msg}")
+        
+        # Post to Zendesk
+        post_zendesk_comment(
+            ticket_id=ticket_id,
+            internal_comment=internal_note,
+            public_comment=public_note
+        )
+        
+        logger.info(f"📝 Posted MCP status to Zendesk ticket {ticket_id}")
             
     except Exception as e:
         logger.error(f"❌ Error updating Zendesk ticket {ticket_id}: {e}") 

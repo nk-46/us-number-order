@@ -12,7 +12,7 @@ from collections import defaultdict
 import phonenumbers
 from phonenumbers import parse, NumberParseException, region_code_for_number, geocoder
 
-# Import MCP integration
+# Import MCP integration for automated number inventory management
 from mcp_integration import MCPNumberInventory, NumberInfo, process_completed_order
 from backorder_tracker import get_backorder_tracker
 
@@ -52,16 +52,9 @@ iq_headers = {
     "Content-Type": "application/json"
 }
 
-# Configure logging
-LOG_FILE = "data/us_ca_lc.log"
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
+# Configure logging - using logger instead of basicConfig to avoid conflicts
+# Main logging configuration is handled in zendesk_webhook.py
+LOG_FILE = "/data/us_ca_lc.log"
 logger = logging.getLogger(__name__)
 
 # --------------------------- UTILITY FUNCTIONS ---------------------------
@@ -107,13 +100,19 @@ def retrieve_reserved_iq(payload, endpoint = retrieve_reserved_number_endpoint, 
     
     if response.status_code in [200, 201]:
         logger.info(f"Reserved numbers retrieval completed: {response.json()}")
-        print(f"Reserved Numbers list retrieved:\n{response.json()}")
+        logger.info(f"Reserved Numbers list retrieved:\n{response.json()}")
         return response.json()
     else:
         raise Exception(f" API call failed: {response.status_code} = {response.text}")
 
 
 def order_reserved_numbers(reserved_tns, private_key= iq_private_key, trunk_group= iq_trunk_group, endpoint="/tnOrder", method="POST", ticket_id=None):
+    """
+    Order reserved numbers from Inteliquent and automatically add to inventory via MCP
+    
+    Enhanced to include MCP integration for automatic inventory management.
+    The ticket_id parameter enables Zendesk status updates for MCP operations.
+    """
     url = f"{iq_api_base_url}{endpoint}"
     
     payload = {
@@ -143,7 +142,8 @@ def order_reserved_numbers(reserved_tns, private_key= iq_private_key, trunk_grou
         logger.info(f"{response.json()}")
         order_response = response.json()
         
-        # Add MCP integration to add numbers to inventory
+        # Add MCP integration to automatically add numbers to inventory
+        # This ensures numbers are immediately available in the system after ordering
         try:
             add_numbers_to_inventory_via_mcp(reserved_tns, order_response, ticket_id)
         except Exception as e:
@@ -156,6 +156,10 @@ def order_reserved_numbers(reserved_tns, private_key= iq_private_key, trunk_grou
 def add_numbers_to_inventory_via_mcp(reserved_tns, order_response, ticket_id=None):
     """
     Add ordered numbers to inventory via MCP server
+    
+    This function automatically adds successfully ordered numbers to the inventory
+    system via the MCP (Model Context Protocol) server. It converts Inteliquent
+    number format to the required MCP format and handles region ID mapping.
     
     Args:
         reserved_tns: List of reserved telephone numbers from Inteliquent
@@ -175,9 +179,19 @@ def add_numbers_to_inventory_via_mcp(reserved_tns, order_response, ticket_id=Non
             if not tn_number:
                 continue
                 
-            # Ensure number is in proper format
-            if not tn_number.startswith("+"):
-                tn_number = f"+1{tn_number}" if len(tn_number) == 10 else f"+{tn_number}"
+            # Ensure number is in proper format without + prefix
+            # Remove any existing + prefix and ensure proper length
+            if tn_number.startswith("+"):
+                tn_number = tn_number[1:]  # Remove + prefix
+            
+            # Ensure number has country code (1 for US/Canada)
+            if len(tn_number) == 10:
+                tn_number = f"1{tn_number}"  # Add country code without +
+            elif len(tn_number) == 11 and tn_number.startswith("1"):
+                tn_number = tn_number  # Already has country code
+            else:
+                # Keep as is if it's already in international format
+                pass
             
             numbers_added.append(tn_number)
             
@@ -187,11 +201,16 @@ def add_numbers_to_inventory_via_mcp(reserved_tns, order_response, ticket_id=Non
             lata = tn.get("lata", "")
             
             # Extract area code for region ID lookup
-            area_code = tn_number[2:5] if len(tn_number) >= 5 else ""
+            # Number format is now: 1XXXXXXXXXX (11 digits)
+            area_code = tn_number[1:4] if len(tn_number) >= 11 else ""
+            
+            # Determine country based on area code for carrier tier selection
+            # Canada area codes for proper carrier tier assignment
             country = "CA" if area_code in ['204', '226', '236', '249', '250', '289', '306', '343', '365', '403', '416', '418', '431', '437', '438', '450', '506', '514', '519', '548', '579', '581', '587', '604', '613', '639', '647', '705', '709', '742', '778', '780', '782', '807', '819', '825', '867', '873', '902', '905'] else "US"
             
             # Determine carrier tier ID based on country
-            carrier_tier_id = 10000253 if country == "CA" else 10000252  # Canada: 10000253, US: 10000252
+            # 10000252: US tier, 10000253: Canada tier
+            carrier_tier_id = 10000253 if country == "CA" else 10000252
             
             # Get region_id using simple area code lookup
             from mcp_integration import get_region_id_from_area_code
@@ -265,6 +284,12 @@ def place_inteliquent_backorder(
     endpoint: str = request_iq_number_endpoint,
     quantity: int = 1
 ) -> dict:
+    """
+    Place backorder with Inteliquent and add to tracking system
+    
+    Enhanced to include backorder tracking for automated status monitoring.
+    Backorders are automatically tracked and polled for completion status.
+    """
     url = f"{iq_api_base_url}{endpoint}"
     payload = {
         "privateKey": iq_private_key,
@@ -286,7 +311,8 @@ def place_inteliquent_backorder(
             backorder_response = response.json()
             order_id = backorder_response.get("orderId") or backorder_response.get("tnOrderId", "N/A")
             
-            # Add backorder to tracking
+            # Add backorder to tracking system for automated monitoring
+            # This enables periodic status checks and automatic MCP integration upon completion
             try:
                 tracker = get_backorder_tracker()
                 tracker.add_backorder(
@@ -343,7 +369,7 @@ def search_plivo_numbers(numbers, number_with_area_code, area_code, region, type
 # --------------------------- OPENAI ASSISTANT FLOW ---------------------------
 
 def run_assistant_with_input(assistant_id, user_message):
-    print("📨 Sending user message...")
+    logger.info("📨 Sending user message...")
     thread = openai_client.beta.threads.create()
     openai_client.beta.threads.messages.create(
         thread_id=thread.id,
@@ -351,31 +377,30 @@ def run_assistant_with_input(assistant_id, user_message):
         content=user_message
     )
 
-    print("⚙️  Running assistant...")
+    logger.info("⚙️  Running assistant...")
     run = openai_client.beta.threads.runs.create(
         thread_id=thread.id,
         assistant_id=ASSISTANT_ID
     )
 
-    while True:
-        run_status = openai_client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
-        if run_status.status == "completed":
-            break
-        elif run_status.status in ["failed", "cancelled", "expired"]:
-            raise Exception(f"❌ Assistant run failed with status: {run_status.status}")
+    while run.status != "completed":
+        run = openai_client.beta.threads.runs.retrieve(
+            thread_id=thread.id,
+            run_id=run.id
+        )
         time.sleep(1)
 
-    print("📬 Fetching assistant response...")
+    logger.info("📬 Fetching assistant response...")
     messages = openai_client.beta.threads.messages.list(thread_id=thread.id)
     
-    for msg in reversed(messages.data):
-        if msg.role == "assistant":
-            content = msg.content[0].text.value
-            print("\n🤖 Assistant Response:")
-            logger.info("\nAssistant response:")
+    for message in messages.data:
+        if message.role == "assistant":
+            content = message.content[0].text.value
+            logger.info("\n🤖 Assistant Response:")
             logger.info(content)
-            print(content)
             return content
+    
+    logger.warning("No AI response found.")
     return None
 
 # --------------------------- PARSE AND SEARCH FLOW ---------------------------
@@ -390,7 +415,7 @@ def handle_user_request(user_input,ticket_id=None):
     ordered_number_details = {}
 
     if not ai_response:
-        print("No AI response found.")
+        logger.warning("No AI response found.")
         return
 
     try:
@@ -413,9 +438,15 @@ def handle_user_request(user_input,ticket_id=None):
         ]
         logger.info(f"📋 Filtered numbers to process: {json.dumps(numbers_list, indent=2)}")
 
-    except Exception as e:
-        print(f"❌ Failed to parse AI response as JSON: {e}")
-        return f"{full_output} Failed to extract number patterns from assistant's response"
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ Failed to parse AI response as JSON: {e}")
+        logger.error(f"Raw AI response: {ai_response}")
+        return {
+            "public": "Sorry, I couldn't process your request. Please try again.",
+            "internal": f"AI response parsing failed: {e}",
+            "skip_update": True,
+            "prefix": None
+        }
 
     results_text = ""
     searched_keys = set()
@@ -443,10 +474,10 @@ def handle_user_request(user_input,ticket_id=None):
             num = parse(dummy_number, "US")
             region = region_code_for_number(num)
         except NumberParseException:
-            print(f"❌ Invalid prefix skipped: {search_key}")
+            logger.warning(f"❌ Invalid prefix skipped: {search_key}")
             continue
 
-        print(f"\n🔍 Searching for: {search_key} (limit: {quantity}, region: {region})")
+        logger.info(f"\n🔍 Searching for: {search_key} (limit: {quantity}, region: {region})")
 
         # -- Plivo Search --
         numbers = ["dummy"]  # Just to pass "non-empty" check
@@ -459,16 +490,15 @@ def handle_user_request(user_input,ticket_id=None):
             logger.info(f"✅ Plivo results for {search_key}:")
             for r in result:
                 results_text += f" - {r['number']}\n"
-                print(f" - {r['number']}")
                 logger.info(f" - {r['number']}")
 
             if len(result) >= quantity:
                 continue  # No need to fallback
             else:
-                print(f"Only {len(result)} out of {quantity} Plivo numbers found - triggering Inteliquent fallback...")
+                logger.info(f"Only {len(result)} out of {quantity} Plivo numbers found - triggering Inteliquent fallback...")
                 logger.info(f"Only {len(result)} out of {quantity} Plivo numbers found - triggering Inteliquent fallback...")
         else:
-            print(f"❌ No Plivo result. Falling back to Inteliquent for {search_key}...")
+            logger.info(f"❌ No Plivo result. Falling back to Inteliquent for {search_key}...")
             logger.info(f"❌ No Plivo result. Falling back to Inteliquent for {search_key}...")
 
         # -- Inteliquent Fallback --
@@ -485,7 +515,7 @@ def handle_user_request(user_input,ticket_id=None):
 
             # === CASE 1: No results at all ===
             if iq_response.get("statusCode") == "430" or not iq_response.get("tnResult"):
-                print(f"❌ No inventory in Inteliquent. Placing full backorder for {quantity}")
+                logger.info(f"❌ No inventory in Inteliquent. Placing full backorder for {quantity}")
                 logger.info(f"❌ No inventory in Inteliquent. Placing full backorder for {quantity}")
                 backorder_response = place_inteliquent_backorder(
                     npa=search_key,
@@ -514,35 +544,35 @@ def handle_user_request(user_input,ticket_id=None):
             total_results = iq_response.get("tnResult", [])
             
             if total_results:
-                print(f"✅ Inteliquent results for {search_key}:")
+                logger.info(f"✅ Inteliquent results for {search_key}:")
                 results_text += f"\n\nInteliquent results for {search_key}:\n"
 
                 for tn in total_results:
-                    print(f" - {tn['telephoneNumber']} ({tn['city']}, {tn['province']})")
+                    logger.info(f" - {tn['telephoneNumber']} ({tn['city']}, {tn['province']})")
                     results_text += f" - {tn['telephoneNumber']} ({tn['city']}, {tn['province']})\n"
 
                 # Store ordered numbers for this area code
                 ordered_number_details[search_key] = [tn.get("telephoneNumber") for tn in total_results]
-                print(f"\n Ordered numbers for {search_key}")
+                logger.info(f"\n Ordered numbers for {search_key}")
                 results_text += f"\nOrdered numbers for {search_key}\n"
                 for tn in ordered_number_details.get(search_key,[]):
-                    print(f": - {tn}\n")
+                    logger.info(f": - {tn}\n")
                     results_text += f": - {tn}\n"
 
                 try:
                     order_response = order_reserved_numbers(total_results, iq_private_key, iq_trunk_group, ticket_id=ticket_id)
-                    print("Order Response:")
+                    logger.info("Order Response:")
                     iq_ordered_summary[search_key] = len(total_results)
                     logger.info(f"✅ Ordered {len(total_results)} numbers for area code {area_code}")
-                    print(json.dumps(order_response, indent=5))
+                    logger.info(f"Order Response: {json.dumps(order_response, indent=5)}")
                     results_text += f"\n\n{order_response}"
                 except Exception as e:
-                    print(f"Failed to order numbers {e}")
+                    logger.error(f"Failed to order numbers {e}")
 
                 # 🔁 Backorder remaining quantity, if needed
                 if len(total_results) < quantity:
                     remaining_quantity = quantity - len(total_results)
-                    print(f"⚠️ Only {len(total_results)} found. Placing backorder for remaining {remaining_quantity}")
+                    logger.info(f"⚠️ Only {len(total_results)} found. Placing backorder for remaining {remaining_quantity}")
                     backorder_response = place_inteliquent_backorder(
                         npa=search_key,
                         trunk_group=iq_trunk_group,
@@ -558,7 +588,7 @@ def handle_user_request(user_input,ticket_id=None):
 
 
         except Exception as e:
-            print(f"⚠️ Error searching Inteliquent: {e}")
+            logger.error(f"⚠️ Error searching Inteliquent: {e}")
 
     # --------- FORMAT public_text SUMMARY ---------
     public_text = "Hello Team,\n\n"
@@ -593,12 +623,12 @@ def handle_user_request(user_input,ticket_id=None):
         )
 
 
-    print(f"Public text: {public_text}")
-    print(f"Prefix: {search_key}")
-    print(f"Ordered numbers: {ordered_number_details}")
+    logger.info(f"Public text: {public_text}")
+    logger.info(f"Prefix: {search_key}")
+    logger.info(f"Ordered numbers: {ordered_number_details}")
     internal_comment = full_output + results_text.strip()
-    print(f"Internal comment: {internal_comment}")
-    print(f"Backorder response: {backorder_response}")
+    logger.info(f"Internal comment: {internal_comment}")
+    logger.info(f"Backorder response: {backorder_response}")
     return {
         "skip_update": False,
         "internal" : full_output + results_text.strip(),
