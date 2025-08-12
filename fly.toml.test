@@ -1,24 +1,30 @@
-# fly.toml app configuration file generated for number-order-us on 2024-12-19T10:00:00Z
+# fly.toml app configuration file for number-order-us-test
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "number-order-us"
-primary_region = "sjc"
+app = 'number-order-us-test'
+primary_region = 'sjc'
 
 [build]
+  dockerfile = 'Dockerfile.test'
 
 [env]
   PYTHONUNBUFFERED = "1"
   HEALTH_CHECK_INTERVAL = "300"
   LOG_ROTATION_ENABLED = "true"
 
+[[mounts]]
+  source = 'data_test'
+  destination = '/data'
+
 [http_service]
   internal_port = 5000
   force_https = true
-  auto_stop_machines = "off"
   auto_start_machines = true
+  auto_stop_machines = "off"
   min_machines_running = 1
-  processes = ["app"]
+  processes = ['app']
 
   [[http_service.checks]]
     grace_period = "10s"
@@ -35,14 +41,6 @@ primary_region = "sjc"
     path = "/metrics"
 
 [[vm]]
-  cpu_kind = "shared"
-  cpus = 1
-  memory_mb = 512
-
-[[statics]]
-  guest_path = "/app/static"
-  url_prefix = "/static/"
-
-[mounts]
-  source = "data"
-  destination = "/data"
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1 

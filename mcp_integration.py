@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
 MCP (Model Context Protocol) Integration for Number Inventory
-Handles adding numbers to inventory via MCP server
+Handles adding numbers to inventory via MCP server with circuit breaker pattern.
+
+ADDITIVE FEATURE:
+- Automated number inventory management via MCP
+- Circuit breaker for API reliability
+- Sequential processing for MCP server limitations
+- Region detection for US/Canada numbers
 """
 
 import os
@@ -10,9 +16,10 @@ import logging
 import requests
 import phonenumbers
 from phonenumbers import geocoder
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
+import base64
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -21,6 +28,40 @@ load_dotenv()
 # Configure logging - using logger instead of basicConfig to avoid conflicts
 # Main logging configuration is handled in zendesk_webhook.py
 logger = logging.getLogger(__name__)
+
+# Circuit breaker for MCP API
+class CircuitBreaker:
+    def __init__(self, failure_threshold=3, recovery_timeout=60):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+    
+    def call(self, func, *args, **kwargs):
+        if self.state == "OPEN":
+            if datetime.now() - self.last_failure_time > timedelta(seconds=self.recovery_timeout):
+                self.state = "HALF_OPEN"
+            else:
+                raise Exception("Circuit breaker is OPEN")
+        
+        try:
+            result = func(*args, **kwargs)
+            if self.state == "HALF_OPEN":
+                self.state = "CLOSED"
+                self.failure_count = 0
+            return result
+        except Exception as e:
+            self.failure_count += 1
+            self.last_failure_time = datetime.now()
+            
+            if self.failure_count >= self.failure_threshold:
+                self.state = "OPEN"
+            
+            raise e
+
+# Initialize circuit breaker for MCP
+mcp_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
 
 def get_region_id_from_area_code(area_code: str) -> int:
     """
@@ -152,13 +193,17 @@ class MCPNumberInventory:
                     }
                     
                     # Make request to MCP server for single number
-                    response = requests.post(
-                        self.mcp_url,
-                        json=payload,
-                        auth=(self.mcp_username, self.mcp_password),
-                        headers={'Content-Type': 'application/json'},
-                        timeout=30
-                    )
+                    def make_mcp_request():
+                        return requests.post(
+                            self.mcp_url,
+                            json=payload,
+                            auth=(self.mcp_username, self.mcp_password),
+                            headers={'Content-Type': 'application/json'},
+                            timeout=30
+                        )
+                    
+                    # Use circuit breaker for MCP API calls
+                    response = mcp_circuit_breaker.call(make_mcp_request)
                     
                     if response.status_code == 200:
                         response_data = response.json()
@@ -224,20 +269,31 @@ class InteliquentOrderTracker:
             raise ValueError("Missing Inteliquent credentials")
 
     def _get_headers(self):
-        """Get headers for Inteliquent API requests"""
+        """Get headers for Inteliquent API requests with Basic Auth"""
+        # Create Basic Auth header with base64-encoded credentials
+        credentials = f"{self.username}:{self.password}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        
         return {
             'Content-Type': 'application/json',
-            'Accept': 'application/json'
+            'Accept': 'application/json',
+            'Authorization': f'Basic {encoded_credentials}'
         }
 
     def check_order_status(self, order_id: str) -> Dict:
         """Check the status of an Inteliquent order"""
         try:
-            url = f"{self.base_url}/orders/{order_id}"
+            url = f"{self.base_url}/orderDetail"
             
-            response = requests.get(
+            # Inteliquent API expects POST with JSON payload
+            payload = {
+                "privateKey": self.username,
+                "orderId": int(order_id) if order_id.isdigit() else order_id
+            }
+            
+            response = requests.post(
                 url,
-                auth=(self.username, self.password),
+                json=payload,
                 headers=self._get_headers(),
                 timeout=30
             )

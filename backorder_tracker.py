@@ -1,3 +1,16 @@
+#!/usr/bin/env python3
+"""
+Backorder Tracking System
+Monitors Inteliquent backorders and automatically processes completed orders.
+
+ADDITIVE FEATURE:
+- Automated backorder status monitoring
+- MCP integration for completed orders
+- Status updates to Zendesk tickets
+- Age-based filtering (6+ hours)
+- Completion date tracking and stop logic
+"""
+
 import os
 import time
 import json
@@ -14,6 +27,25 @@ from mcp_integration import InteliquentOrderTracker, process_completed_order
 # Main logging configuration is handled in zendesk_webhook.py
 logger = logging.getLogger(__name__)
 
+# Configure logging for backorder tracker
+BACKORDER_LOG_FILE = "/data/backorder_tracker.log"
+backorder_logger = logging.getLogger("backorder_tracker")
+backorder_logger.setLevel(logging.DEBUG)
+
+# Create file handler for backorder tracker
+try:
+    backorder_handler = logging.FileHandler(BACKORDER_LOG_FILE)
+except FileNotFoundError:
+    # Fallback for local development
+    BACKORDER_LOG_FILE = "data/backorder_tracker.log"
+    os.makedirs("data", exist_ok=True)
+    backorder_handler = logging.FileHandler(BACKORDER_LOG_FILE)
+
+backorder_handler.setLevel(logging.DEBUG)
+backorder_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+backorder_handler.setFormatter(backorder_formatter)
+backorder_logger.addHandler(backorder_handler)
+
 @dataclass
 class BackorderRecord:
     """Data class for backorder tracking"""
@@ -29,7 +61,11 @@ class BackorderRecord:
 class BackorderTracker:
     """Background tracker for Inteliquent backorders"""
     
-    def __init__(self, db_path: str = "data/backorders.db"):
+    def __init__(self, db_path: str = "/data/backorders.db"):
+        # Handle local development environment
+        if not os.path.exists("/data") and os.path.exists("data"):
+            db_path = "data/backorders.db"
+        
         self.db_path = db_path
         self.tracker = InteliquentOrderTracker()
         self.running = False
@@ -154,9 +190,25 @@ class BackorderTracker:
     def create_backorder_status_note(self, backorder: BackorderRecord, status_result: dict) -> str:
         """Create a status note for backorder tracking"""
         
-        status = status_result.get("status", "unknown")
-        progress = status_result.get("progress", "unknown")
-        estimated_completion = status_result.get("estimatedCompletion", "unknown")
+        # Get the correct status from Inteliquent response
+        order_detail = status_result.get("orderDetailResponse", {})
+        status = order_detail.get("orderStatus", "unknown")
+        estimated_completion = order_detail.get("desiredDueDate", "unknown")
+        
+        # Don't create notes for completed orders
+        if status.lower() == "closed":
+            logger.info(f"✅ Backorder {backorder.order_id} is completed - no status note needed")
+            return ""
+        
+        # Check if tracking should stop (past estimated completion date)
+        tracking_stopped = False
+        if estimated_completion != "unknown":
+            try:
+                completion_date = datetime.fromisoformat(estimated_completion.replace('Z', '+00:00'))
+                if datetime.now() > completion_date:
+                    tracking_stopped = True
+            except:
+                pass
         
         # Format the estimated completion date
         try:
@@ -174,19 +226,20 @@ class BackorderTracker:
         note += f"Area Code: {backorder.area_code}\n"
         note += f"Quantity: {backorder.quantity}\n"
         note += f"Current Status: {status.upper()}\n"
-        note += f"Progress: {progress}\n"
         note += f"Estimated Completion: {formatted_date}\n\n"
         
-        if status == "pending":
+        if tracking_stopped:
+            note += "🛑 **TRACKING STOPPED** - Estimated completion date has passed.\n"
+            note += "This backorder will no longer be monitored automatically.\n"
+            note += "Please check with the carrier directly for current status.\n"
+        elif status.lower() == "pending":
             note += "📋 This backorder is still being processed by our carrier.\n"
             note += "We'll continue monitoring and update you when numbers become available.\n"
-        elif status == "completed":
-            note += "✅ This backorder has been completed!\n"
-            note += "Numbers have been added to inventory via MCP integration.\n"
         else:
             note += "⏳ Status is being monitored.\n"
         
-        note += f"\nNext status check: {(datetime.now() + timedelta(hours=4)).strftime('%Y-%m-%d %H:%M:%S')}"
+        if not tracking_stopped:
+            note += f"\nNext status check: {(datetime.now() + timedelta(hours=4)).strftime('%Y-%m-%d %H:%M:%S')}"
         
         return note
 
@@ -196,6 +249,11 @@ class BackorderTracker:
             from zendesk_webhook import post_zendesk_comment
             
             status_note = self.create_backorder_status_note(backorder, status_result)
+            
+            # Skip posting if note is empty (completed orders)
+            if not status_note:
+                logger.info(f"✅ Skipping status note for completed backorder {backorder.order_id}")
+                return
             
             post_zendesk_comment(
                 ticket_id=backorder.ticket_id,
@@ -326,16 +384,43 @@ class BackorderTracker:
                             status_result = self.tracker.check_order_status(backorder.order_id)
                             
                             if "error" not in status_result:
-                                # Post status note every 4 hours
-                                self.post_backorder_status_note(backorder, status_result)
+                                # Check if order is completed first
+                                order_detail = status_result.get("orderDetailResponse", {})
+                                order_status = order_detail.get("orderStatus", "")
                                 
-                                # Check if completed
-                                if status_result.get("status") == "completed":
+                                if order_status == "Closed":
+                                    # ✅ Order is completed - process and stop tracking
+                                    logger.info(f"✅ Backorder {backorder.order_id} is completed - processing numbers")
+                                    
                                     if self.check_backorder_completion(backorder):
-                                        logger.info(f"✅ Backorder {backorder.order_id} completed!")
+                                        logger.info(f"✅ Backorder {backorder.order_id} completed and numbers added to inventory!")
+                                        # Status is now "completed" - no more tracking or notes
+                                        continue
                                     else:
-                                        logger.info(f"⏳ Backorder {backorder.order_id} still pending")
+                                        logger.warning(f"⚠️ Backorder {backorder.order_id} marked as closed but no numbers found")
+                                        continue
+                                
+                                # Check if tracking should stop (past estimated completion date)
+                                estimated_completion = order_detail.get("desiredDueDate")
+                                
+                                tracking_stopped = False
+                                if estimated_completion:
+                                    try:
+                                        completion_date = datetime.fromisoformat(estimated_completion.replace('Z', '+00:00'))
+                                        if datetime.now() > completion_date:
+                                            tracking_stopped = True
+                                            logger.info(f"🛑 Stopping tracking for backorder {backorder.order_id} - past estimated completion date")
+                                    except:
+                                        pass
+                                
+                                if tracking_stopped:
+                                    # Post final status note and mark as stopped
+                                    self.post_backorder_status_note(backorder, status_result)
+                                    self.update_backorder_status(backorder.order_id, "stopped")
+                                    logger.info(f"🛑 Backorder {backorder.order_id} tracking stopped")
                                 else:
+                                    # Post status note every 4 hours (only for pending orders)
+                                    self.post_backorder_status_note(backorder, status_result)
                                     logger.info(f"⏳ Backorder {backorder.order_id} still pending")
                             else:
                                 logger.warning(f"⚠️ Error checking backorder {backorder.order_id}: {status_result['error']}")
@@ -361,8 +446,21 @@ def get_backorder_tracker() -> BackorderTracker:
 
 def start_backorder_tracking():
     """Start the backorder tracking service"""
-    tracker = get_backorder_tracker()
-    tracker.start_tracking()
+    backorder_logger.info("🚀 Starting backorder tracking service...")
+    
+    try:
+        tracker = get_backorder_tracker()
+        backorder_logger.info("✅ Backorder tracker initialized successfully")
+        
+        # Ensure the foreground loop actually runs
+        tracker.running = True
+        backorder_logger.info("▶️ Entering tracking loop (foreground)")
+        
+        # Start tracking loop in the foreground for process supervision
+        tracker._tracking_loop()
+    except Exception as e:
+        backorder_logger.error(f"❌ Backorder tracking service failed: {e}")
+        raise
 
 def stop_backorder_tracking():
     """Stop the backorder tracking service"""

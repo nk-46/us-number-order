@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+"""
+US Number Order System - Main Logic
+Handles number search, ordering, and MCP integration for automated inventory management.
+
+ADDITIVE CHANGES:
+- MCP integration for automatic number inventory management
+- Backorder tracking for Inteliquent orders
+- Enhanced error handling and logging
+"""
+
 import os
 import re
 import time

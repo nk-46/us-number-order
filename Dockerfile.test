@@ -31,4 +31,4 @@ COPY logrotate.conf /etc/logrotate.d/us-number-order
 EXPOSE 5000 6379
 
 # Start Redis and the application
-CMD ["/app/startup.sh"]
+CMD ["/app/startup.sh"] 
