@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+"""
+US Number Order System - Main Logic
+Handles number search, ordering, and MCP integration for automated inventory management.
+
+ADDITIVE CHANGES:
+- MCP integration for automatic number inventory management
+- Backorder tracking for Inteliquent orders
+- Enhanced error handling and logging
+"""
+
 import os
 import re
 import time
@@ -11,6 +22,10 @@ from plivo import RestClient
 from collections import defaultdict
 import phonenumbers
 from phonenumbers import parse, NumberParseException, region_code_for_number, geocoder
+
+# Import MCP integration
+from mcp_integration import MCPNumberInventory, NumberInfo, process_completed_order
+from backorder_tracker import get_backorder_tracker
 
 # Load environment variables
 load_dotenv(override=True)
@@ -49,7 +64,7 @@ iq_headers = {
 }
 
 # Configure logging
-LOG_FILE = "/data/us_ca_lc.log"
+LOG_FILE = "data/us_ca_lc.log"
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -109,7 +124,7 @@ def retrieve_reserved_iq(payload, endpoint = retrieve_reserved_number_endpoint, 
         raise Exception(f" API call failed: {response.status_code} = {response.text}")
 
 
-def order_reserved_numbers(reserved_tns, private_key= iq_private_key, trunk_group= iq_trunk_group, endpoint="/tnOrder", method="POST"):
+def order_reserved_numbers(reserved_tns, private_key= iq_private_key, trunk_group= iq_trunk_group, endpoint="/tnOrder", method="POST", ticket_id=None):
     url = f"{iq_api_base_url}{endpoint}"
     
     payload = {
@@ -137,9 +152,121 @@ def order_reserved_numbers(reserved_tns, private_key= iq_private_key, trunk_grou
     if response.status_code in [200, 201]:
         logger.info("✅ Number order placed successfully.")
         logger.info(f"{response.json()}")
-        return response.json()
+        order_response = response.json()
+        
+        # Add MCP integration to add numbers to inventory
+        try:
+            add_numbers_to_inventory_via_mcp(reserved_tns, order_response, ticket_id)
+        except Exception as e:
+            logger.error(f"⚠️ MCP integration failed: {e}")
+        
+        return order_response
     else:
         raise Exception(f"API call failed: {response.status_code} - {response.text}")
+
+def add_numbers_to_inventory_via_mcp(reserved_tns, order_response, ticket_id=None):
+    """
+    Add ordered numbers to inventory via MCP server
+    
+    Args:
+        reserved_tns: List of reserved telephone numbers from Inteliquent
+        order_response: Response from Inteliquent order API
+        ticket_id: Optional Zendesk ticket ID for status updates
+    """
+    try:
+        # Initialize MCP client
+        mcp_client = MCPNumberInventory()
+        
+        # Convert Inteliquent numbers to NumberInfo objects
+        number_infos = []
+        numbers_added = []
+        for tn in reserved_tns:
+            # Extract number from Inteliquent response
+            tn_number = tn.get("telephoneNumber") or tn.get("tn")
+            if not tn_number:
+                continue
+                
+            # Ensure number is in proper format
+            if not tn_number.startswith("+"):
+                tn_number = f"+1{tn_number}" if len(tn_number) == 10 else f"+{tn_number}"
+            
+            numbers_added.append(tn_number)
+            
+            # Extract additional info from Inteliquent response
+            city = tn.get("city", "")
+            rate_center = tn.get("rateCenter", "")
+            lata = tn.get("lata", "")
+            
+            # Extract area code for region ID lookup
+            area_code = tn_number[2:5] if len(tn_number) >= 5 else ""
+            country = "CA" if area_code in ['204', '226', '236', '249', '250', '289', '306', '343', '365', '403', '416', '418', '431', '437', '438', '450', '506', '514', '519', '548', '579', '581', '587', '604', '613', '639', '647', '705', '709', '742', '778', '780', '782', '807', '819', '825', '867', '873', '902', '905'] else "US"
+            
+            # Determine carrier tier ID based on country
+            carrier_tier_id = 10000253 if country == "CA" else 10000252  # Canada: 10000253, US: 10000252
+            
+            # Get region_id using simple area code lookup
+            from mcp_integration import get_region_id_from_area_code
+            region_id = get_region_id_from_area_code(area_code)
+            
+            number_info = NumberInfo(
+                number=tn_number,
+                number_type="LOCAL",
+                voice_enabled=True,
+                sms_enabled=True,
+                mms_enabled=True,
+                carrier_id="95201903171584",  # Correct carrier ID
+                carrier_tier_id=carrier_tier_id,
+                region_id=region_id,  # May be None if not found
+                city=city,
+                rate_center=rate_center,
+                lata=lata,
+                account_id=12345,  # Default account
+                sub_account_id=67890,  # Default sub-account
+                app_id="app_123456",  # Default app
+                country_iso2=country,
+                skip_validation=False
+            )
+            number_infos.append(number_info)
+        
+        if number_infos:
+            # Add numbers to inventory via MCP
+            result = mcp_client.add_numbers_to_inventory(
+                numbers=number_infos,
+                user_email="admin@example.com",
+                skip_number_testing=True,
+                skip_phone_number_profile_restrictions=False,
+                reason_skip_number_testing=f"Automated addition from Inteliquent order {order_response.get('orderId', 'unknown')}"
+            )
+            
+            if result.get("success"):
+                logger.info(f"✅ Successfully added {len(number_infos)} numbers to inventory via MCP")
+                logger.info(f"MCP Result: {json.dumps(result, indent=2)}")
+                
+                # Update Zendesk ticket with MCP status if ticket_id is provided
+                if ticket_id:
+                    from mcp_integration import update_zendesk_with_mcp_status
+                    update_zendesk_with_mcp_status(
+                        ticket_id=ticket_id,
+                        mcp_result=result,
+                        numbers_added=numbers_added
+                    )
+            else:
+                logger.error(f"❌ Failed to add numbers to inventory via MCP: {result.get('error')}")
+                
+                # Update Zendesk ticket with MCP failure if ticket_id is provided
+                if ticket_id:
+                    from mcp_integration import update_zendesk_with_mcp_status
+                    update_zendesk_with_mcp_status(
+                        ticket_id=ticket_id,
+                        mcp_result=result,
+                        numbers_added=numbers_added
+                    )
+        else:
+            logger.warning("⚠️ No valid numbers found to add to inventory")
+            
+    except Exception as e:
+        logger.error(f"❌ Exception in MCP integration: {str(e)}")
+        raise
 
 def place_inteliquent_backorder(
     npa: str,
@@ -150,28 +277,42 @@ def place_inteliquent_backorder(
     quantity: int = 1
 ) -> dict:
     url = f"{iq_api_base_url}{endpoint}"
-
     payload = {
         "privateKey": iq_private_key,
-        "customerOrderReference": str(ticket_id),
         "npa": npa,
         "trunkGroup": trunk_group,
         "activate": activate,
-        "quantity": int(quantity)  # ✅ This fixes the error
+        "quantity": quantity
     }
 
-    logger.debug("📦 TN Request Payload:\n" + json.dumps(payload, indent=2))
+    if ticket_id:
+        payload["customerOrderReference"] = f"Ticket_{ticket_id}"
 
-    try:
         response = requests.post(url, json=payload, headers=iq_headers)
+    
         if response.status_code in [200, 201]:
-            logger.info(f"✅ Backorder placed for NPA {npa}.")
-            return response.json()
+            logger.info("✅ Backorder placed successfully.")
+            logger.info(f"{response.json()}")
+            
+            backorder_response = response.json()
+            order_id = backorder_response.get("orderId") or backorder_response.get("tnOrderId", "N/A")
+            
+            # Add backorder to tracking
+            try:
+                tracker = get_backorder_tracker()
+                tracker.add_backorder(
+                    order_id=order_id,
+                    area_code=npa,
+                    quantity=quantity,
+                    ticket_id=ticket_id
+                )
+                logger.info(f"📝 Added backorder {order_id} to tracking")
+            except Exception as e:
+                logger.error(f"⚠️ Failed to add backorder to tracking: {e}")
+            
+            return backorder_response
         else:
             raise Exception(f"API call failed: {response.status_code} - {response.text}")
-    except Exception as e:
-        logger.error(f"❌ Error placing TN request for {npa}: {e}")
-        raise
 
 
 def search_plivo_numbers(numbers, number_with_area_code, area_code, region, type_="local", limit=2):
@@ -400,7 +541,7 @@ def handle_user_request(user_input,ticket_id=None):
                     results_text += f": - {tn}\n"
 
                 try:
-                    order_response = order_reserved_numbers(total_results, iq_private_key, iq_trunk_group)
+                    order_response = order_reserved_numbers(total_results, iq_private_key, iq_trunk_group, ticket_id=ticket_id)
                     print("Order Response:")
                     iq_ordered_summary[search_key] = len(total_results)
                     logger.info(f"✅ Ordered {len(total_results)} numbers for area code {area_code}")
@@ -476,12 +617,4 @@ def handle_user_request(user_input,ticket_id=None):
         "prefix" : str(search_key)
     }
 
-if __name__ == "__main__":
-    USER_INPUT = """
-Hi Team,
-
-Do you have any area code 201 numbers available that end in 4673?
-
-Thank You!
-"""
-    handle_user_request(USER_INPUT,ticket_id=None)
+# Note: Removed test code to prevent accidental execution in production
