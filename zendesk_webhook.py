@@ -1,22 +1,30 @@
-from flask import Flask, request, jsonify
-import sqlite3
-import requests
-import os
-import time
-import json
-import uuid
-import logging
-from filelock import FileLock, Timeout
-import redis
+#!/usr/bin/env python3
+"""
+Zendesk Webhook Server
+Handles incoming Zendesk ticket updates and processes number requests.
 
-from main import (
-    handle_user_request,
-    run_assistant_with_input,
-    search_iq_inventory,
-    search_plivo_numbers,
-    order_reserved_numbers,
-    retrieve_reserved_iq
-)
+ADDITIVE CHANGES:
+- Health monitoring endpoints (/health, /metrics)
+- Enhanced Redis error handling
+- Backorder tracking integration
+"""
+
+import os
+import json
+import logging
+import sqlite3
+import redis
+from datetime import datetime
+from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+import requests
+import time
+import uuid
+from filelock import FileLock, Timeout
+
+# Import core functionality
+from main import handle_user_request
+from backorder_tracker import get_backorder_tracker
 
 app = Flask(__name__)
 
@@ -28,15 +36,33 @@ ZENDESK_EMAIL = os.getenv("ZENDESK_EMAIL")
 ZENDESK_TOKEN = os.getenv("ZENDESK_TOKEN")
 DB_NAME = '/data/zendesk_tickets.db'
 
+# Handle local development environment
+if not os.path.exists("/data") and os.path.exists("data"):
+    DB_NAME = "data/zendesk_tickets.db"
+
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0)
-
 
 # -------------------------
 # 📋 Logging Setup
 # -------------------------
 LOG_FILE = "/data/us_ca_lc.log"
+
+# Handle local development environment
+try:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler()
+        ]
+    )
+except FileNotFoundError:
+    # Fallback for local development
+    LOG_FILE = "data/us_ca_lc.log"
+    os.makedirs("data", exist_ok=True)
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -45,6 +71,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
 logger = logging.getLogger(__name__)
 
 TICKET_TAGS = ["support_automation", "us_number_order_ai_automation"]
@@ -153,6 +180,99 @@ def init_db():
     conn.close()
 
 # -------------------------
+# 🏥 Health Check Endpoint
+# -------------------------
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for monitoring"""
+    try:
+        # Check database connectivity
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM tickets")
+        ticket_count = cursor.fetchone()[0]
+        conn.close()
+        
+        # Check Redis connectivity
+        redis_ping = redis_client.ping()
+        
+        health_status = {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "database": "connected",
+            "redis": "connected" if redis_ping else "disconnected",
+            "ticket_count": ticket_count,
+            "version": "1.0.0"
+        }
+        
+        return jsonify(health_status), 200
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
+
+# -------------------------
+# 📊 Metrics Endpoint
+# -------------------------
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    """Metrics endpoint for monitoring system performance"""
+    try:
+        # Database metrics
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        # Get ticket statistics
+        cursor.execute("SELECT COUNT(*) FROM tickets")
+        total_tickets = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM tickets WHERE processed = 1")
+        processed_tickets = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM tickets WHERE processed = 0")
+        pending_tickets = cursor.fetchone()[0]
+        
+        # Note: created_at column doesn't exist in current schema
+        # Using total tickets as recent activity for now
+        recent_tickets = total_tickets
+        
+        conn.close()
+        
+        # Redis metrics
+        redis_info = redis_client.info()
+        
+        metrics_data = {
+            "tickets": {
+                "total": total_tickets,
+                "processed": processed_tickets,
+                "pending": pending_tickets,
+                "recent_24h": recent_tickets
+            },
+            "redis": {
+                "connected_clients": redis_info.get('connected_clients', 0),
+                "used_memory": redis_info.get('used_memory_human', '0B'),
+                "uptime": redis_info.get('uptime_in_seconds', 0)
+            },
+            "system": {
+                "timestamp": datetime.now().isoformat(),
+                "version": "1.0.0"
+            }
+        }
+        
+        return jsonify(metrics_data), 200
+        
+    except Exception as e:
+        logger.error(f"Metrics collection failed: {e}")
+        return jsonify({
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
+
+# -------------------------
 # 📥 Webhook Endpoint
 # -------------------------
 @app.route('/zendesk-webhook', methods=['POST'])
@@ -241,10 +361,12 @@ def zendesk_webhook():
     except Timeout:
         logger.warning(f"⏳ Ticket {ticket_id} already locked and being processed.")
         return jsonify({"status": "skipped - lock held elsewhere"}), 200
+    except redis.exceptions.LockNotOwnedError as e:
+        logger.warning(f"🔓 Redis lock already released for ticket {ticket_id}: {e}")
+        return jsonify({"status": "skipped - lock expired"}), 200
     except Exception as e:
         logger.exception(f"❌ Error during processing: {e}")
         return jsonify({"status": "error"}), 500
-
 
 # -------------------------
 # 🚀 App Runner
