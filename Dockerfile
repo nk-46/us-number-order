@@ -1,18 +1,34 @@
 # Use official Python base image
 FROM python:3.9-slim
 
+# Install system dependencies including Redis, curl, and logrotate
+RUN apt-get update && apt-get install -y \
+    redis-server \
+    curl \
+    logrotate \
+    && rm -rf /var/lib/apt/lists/*
+
 # Set working directory
 WORKDIR /app
 
-# Install dependencies
+# Copy requirements and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
+# Copy application files
 COPY . .
 
-# Expose port
-EXPOSE 5000
+# Make startup script executable
+RUN chmod +x /app/startup.sh
 
-# Run the app
-CMD ["python", "zendesk_webhook.py"]
+# Create data directory
+RUN mkdir -p /data
+
+# Copy log rotation configuration
+COPY logrotate.conf /etc/logrotate.d/us-number-order
+
+# Expose ports for Flask and Redis
+EXPOSE 5000 6379
+
+# Start Redis and the application
+CMD ["/app/startup.sh"]
