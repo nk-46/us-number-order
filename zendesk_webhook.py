@@ -63,14 +63,15 @@ except FileNotFoundError:
     # Fallback for local development
     LOG_FILE = "data/us_ca_lc.log"
     os.makedirs("data", exist_ok=True)
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
+
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler()
+        ]
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,20 @@ def init_db():
     conn.close()
 
 # -------------------------
+
+# 🏠 Root Endpoint
+# -------------------------
+@app.route('/', methods=['GET'])
+def root():
+    """Simple root endpoint for basic health checks"""
+    return jsonify({
+        "status": "running",
+        "service": "us-number-order-webhook",
+        "timestamp": datetime.now().isoformat()
+    }), 200
+
+# -------------------------
+
 # 🏥 Health Check Endpoint
 # -------------------------
 @app.route('/health', methods=['GET'])
@@ -222,6 +237,22 @@ def health_check():
 def metrics():
     """Metrics endpoint for monitoring system performance"""
     try:
+
+        # Get basic metrics
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM tickets")
+        total_tickets = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM tickets WHERE processed = 1")
+        processed_tickets = cursor.fetchone()[0]
+        conn.close()
+        
+        metrics_data = {
+            "total_tickets": total_tickets,
+            "processed_tickets": processed_tickets,
+            "pending_tickets": total_tickets - processed_tickets,
+            "timestamp": datetime.now().isoformat()
+
         # Database metrics
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -261,12 +292,14 @@ def metrics():
                 "timestamp": datetime.now().isoformat(),
                 "version": "1.0.0"
             }
+
         }
         
         return jsonify(metrics_data), 200
         
     except Exception as e:
-        logger.error(f"Metrics collection failed: {e}")
+        logger.error(f"Metrics endpoint failed: {e}")
+
         return jsonify({
             "error": str(e),
             "timestamp": datetime.now().isoformat()

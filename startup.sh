@@ -1,4 +1,5 @@
 #!/bin/bash
+
 """
 Startup Script for US Number Order System
 Orchestrates webhook server and backorder tracker with health monitoring.
@@ -18,21 +19,35 @@ echo "🚀 Starting US Number Order Services with Redis and Health Monitoring...
 # Create data directory if it doesn't exist
 mkdir -p /data
 
-# Start Redis server
-echo "🔴 Starting Redis server..."
-redis-server --daemonize yes --port 6379 --bind 0.0.0.0
-echo "✅ Redis server started"
 
-# Wait for Redis to be ready
-echo "🔍 Waiting for Redis to be ready..."
-sleep 3
-
-# Test Redis connection
-if redis-cli ping > /dev/null 2>&1; then
-    echo "✅ Redis connection successful"
+# Check if we should use external Redis or start our own
+if [ -n "$REDIS_HOST" ] && [ "$REDIS_HOST" != "localhost" ]; then
+    echo "🔗 Connecting to external Redis at $REDIS_HOST:$REDIS_PORT"
+    # Don't start local Redis, just test connection
+    if redis-cli -h $REDIS_HOST -p $REDIS_PORT ping > /dev/null 2>&1; then
+        echo "✅ External Redis connection successful"
+    else
+        echo "❌ External Redis connection failed"
+        exit 1
+    fi
 else
-    echo "❌ Redis connection failed"
-    exit 1
+    echo "🔴 Starting local Redis server..."
+    REDIS_PORT=${REDIS_PORT:-6379}
+    redis-server --daemonize yes --port $REDIS_PORT --bind 0.0.0.0
+    echo "✅ Redis server started on port $REDIS_PORT"
+
+    # Wait for Redis to be ready
+    echo "🔍 Waiting for Redis to be ready..."
+    sleep 3
+
+    # Test Redis connection
+    if redis-cli -p $REDIS_PORT ping > /dev/null 2>&1; then
+        echo "✅ Redis connection successful on port $REDIS_PORT"
+    else
+        echo "❌ Redis connection failed on port $REDIS_PORT"
+        exit 1
+    fi
+
 fi
 
 # Function to check if a process is running
@@ -82,7 +97,13 @@ check_service_health() {
 monitor_resources() {
     echo "📊 Resource Usage:"
     echo "Memory:"
-    free -h | grep -E "Mem|Swap" || echo "Memory info unavailable"
+
+    if command -v free >/dev/null 2>&1; then
+        free -h | grep -E "Mem|Swap" || echo "Memory info unavailable"
+    else
+        echo "Memory info unavailable (free command not found)"
+    fi
+
     echo "Disk:"
     df -h /data | tail -1 || echo "Disk info unavailable"
     echo "---"
@@ -115,10 +136,21 @@ monitor_resources
 
 while true; do
     # Check Redis
-    if ! redis-cli ping > /dev/null 2>&1; then
-        echo "❌ Redis server died! Restarting..."
-        redis-server --daemonize yes --port 6379 --bind 0.0.0.0
-        sleep 3
+
+    if [ -n "$REDIS_HOST" ] && [ "$REDIS_HOST" != "localhost" ]; then
+        # Check external Redis
+        if ! redis-cli -h $REDIS_HOST -p $REDIS_PORT ping > /dev/null 2>&1; then
+            echo "❌ External Redis connection lost! Exiting..."
+            exit 1
+        fi
+    else
+        # Check local Redis
+        if ! redis-cli -p $REDIS_PORT ping > /dev/null 2>&1; then
+            echo "❌ Redis server died! Restarting..."
+            redis-server --daemonize yes --port $REDIS_PORT --bind 0.0.0.0
+            sleep 3
+        fi
+
     fi
     
     # Check webhook server

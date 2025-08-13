@@ -20,14 +20,28 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/data/startup.log"),
-        logging.StreamHandler()
-    ]
-)
+
+try:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler("/data/startup.log"),
+            logging.StreamHandler()
+        ]
+    )
+except FileNotFoundError:
+    # Fallback for local development
+    os.makedirs("data", exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler("data/startup.log"),
+            logging.StreamHandler()
+        ]
+    )
+
 logger = logging.getLogger(__name__)
 
 def signal_handler(signum, frame):
