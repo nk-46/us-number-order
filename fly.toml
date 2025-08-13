@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for number-order-us on 2025-04-22T23:43:08+05:30
+# fly.toml app configuration file generated for us-number-order on 2024-12-19T15:30:00Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -8,19 +8,41 @@ primary_region = 'sjc'
 
 [build]
 
+[env]
+  PYTHONUNBUFFERED = "1"
+  HEALTH_CHECK_INTERVAL = "28800"
+  LOG_ROTATION_ENABLED = "true"
+  # Redis Configuration - Connect to existing us-num-order-redis app
+  REDIS_HOST = "us-num-order-redis.internal"
+  REDIS_PORT = "6379"
+
 [[mounts]]
   source = 'data'
   destination = '/data'
 
-
 [http_service]
   internal_port = 5000
   force_https = true
+  auto_stop_machines = "off"
   auto_start_machines = true
-  min_machines_running = 0
-  processes = ['app']
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "300s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "300s"
+    method = "GET"
+    timeout = "5s"
+    path = "/metrics"
 
 [[vm]]
-  memory = '1gb'
-  cpu_kind = 'shared'
+  cpu_kind = "shared"
   cpus = 1
+  memory_mb = 1024
