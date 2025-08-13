@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 # Configure logging
+
 try:
     logging.basicConfig(
         level=logging.INFO,
@@ -40,6 +41,7 @@ except FileNotFoundError:
             logging.StreamHandler()
         ]
     )
+
 logger = logging.getLogger(__name__)
 
 def signal_handler(signum, frame):

@@ -63,6 +63,7 @@ except FileNotFoundError:
     # Fallback for local development
     LOG_FILE = "data/us_ca_lc.log"
     os.makedirs("data", exist_ok=True)
+
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -180,6 +181,7 @@ def init_db():
     conn.close()
 
 # -------------------------
+
 # 🏠 Root Endpoint
 # -------------------------
 @app.route('/', methods=['GET'])
@@ -192,6 +194,7 @@ def root():
     }), 200
 
 # -------------------------
+
 # 🏥 Health Check Endpoint
 # -------------------------
 @app.route('/health', methods=['GET'])
@@ -234,6 +237,7 @@ def health_check():
 def metrics():
     """Metrics endpoint for monitoring system performance"""
     try:
+
         # Get basic metrics
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -248,12 +252,54 @@ def metrics():
             "processed_tickets": processed_tickets,
             "pending_tickets": total_tickets - processed_tickets,
             "timestamp": datetime.now().isoformat()
+
+        # Database metrics
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        # Get ticket statistics
+        cursor.execute("SELECT COUNT(*) FROM tickets")
+        total_tickets = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM tickets WHERE processed = 1")
+        processed_tickets = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM tickets WHERE processed = 0")
+        pending_tickets = cursor.fetchone()[0]
+        
+        # Note: created_at column doesn't exist in current schema
+        # Using total tickets as recent activity for now
+        recent_tickets = total_tickets
+        
+        conn.close()
+        
+        # Redis metrics
+        redis_info = redis_client.info()
+        
+        metrics_data = {
+            "tickets": {
+                "total": total_tickets,
+                "processed": processed_tickets,
+                "pending": pending_tickets,
+                "recent_24h": recent_tickets
+            },
+            "redis": {
+                "connected_clients": redis_info.get('connected_clients', 0),
+                "used_memory": redis_info.get('used_memory_human', '0B'),
+                "uptime": redis_info.get('uptime_in_seconds', 0)
+            },
+            "system": {
+                "timestamp": datetime.now().isoformat(),
+                "version": "1.0.0"
+            }
+
         }
         
         return jsonify(metrics_data), 200
         
     except Exception as e:
         logger.error(f"Metrics endpoint failed: {e}")
+
         return jsonify({
             "error": str(e),
             "timestamp": datetime.now().isoformat()

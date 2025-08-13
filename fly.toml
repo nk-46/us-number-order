@@ -12,9 +12,11 @@ primary_region = 'sjc'
   PYTHONUNBUFFERED = "1"
   HEALTH_CHECK_INTERVAL = "28800"
   LOG_ROTATION_ENABLED = "true"
+
   # Redis Configuration - Connect to existing us-num-order-redis app
   REDIS_HOST = "us-num-order-redis.internal"
   REDIS_PORT = "6379"
+
 
 [[mounts]]
   source = 'data'

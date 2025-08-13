@@ -1,11 +1,24 @@
 #!/bin/bash
 
+"""
+Startup Script for US Number Order System
+Orchestrates webhook server and backorder tracker with health monitoring.
+
+ADDITIVE FEATURE:
+- Multi-process orchestration with health monitoring
+- Auto-restart on process failure
+- Redis server management
+- Resource monitoring and logging
+- Optimized health check intervals (5 minutes)
+"""
+
 set -e
 
 echo "🚀 Starting US Number Order Services with Redis and Health Monitoring..."
 
 # Create data directory if it doesn't exist
 mkdir -p /data
+
 
 # Check if we should use external Redis or start our own
 if [ -n "$REDIS_HOST" ] && [ "$REDIS_HOST" != "localhost" ]; then
@@ -34,6 +47,7 @@ else
         echo "❌ Redis connection failed on port $REDIS_PORT"
         exit 1
     fi
+
 fi
 
 # Function to check if a process is running
@@ -83,11 +97,13 @@ check_service_health() {
 monitor_resources() {
     echo "📊 Resource Usage:"
     echo "Memory:"
+
     if command -v free >/dev/null 2>&1; then
         free -h | grep -E "Mem|Swap" || echo "Memory info unavailable"
     else
         echo "Memory info unavailable (free command not found)"
     fi
+
     echo "Disk:"
     df -h /data | tail -1 || echo "Disk info unavailable"
     echo "---"
@@ -120,6 +136,7 @@ monitor_resources
 
 while true; do
     # Check Redis
+
     if [ -n "$REDIS_HOST" ] && [ "$REDIS_HOST" != "localhost" ]; then
         # Check external Redis
         if ! redis-cli -h $REDIS_HOST -p $REDIS_PORT ping > /dev/null 2>&1; then
@@ -133,6 +150,7 @@ while true; do
             redis-server --daemonize yes --port $REDIS_PORT --bind 0.0.0.0
             sleep 3
         fi
+
     fi
     
     # Check webhook server
