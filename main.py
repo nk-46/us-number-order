@@ -367,6 +367,20 @@ def handle_user_request(user_input,ticket_id=None):
                 logger.info(f"📦 Full backorder placed. Order ID: {order_id}")
                 results_text += f"\n📦 Backorder placed for full quantity. Order ID: {order_id}\n"
 
+                # Add backorder to tracking database
+                try:
+                    from backorder_tracker import get_backorder_tracker
+                    tracker = get_backorder_tracker()
+                    tracker.add_backorder(
+                        order_id=order_id,
+                        area_code=search_key,
+                        quantity=quantity,
+                        ticket_id=ticket_id
+                    )
+                    logger.info(f"✅ Backorder {order_id} added to tracking database")
+                except Exception as e:
+                    logger.error(f"❌ Failed to add backorder to tracking: {e}")
+
                 iq_backorder_summary[search_key] = quantity
 
                 continue  # Skip rest of loop
@@ -422,6 +436,21 @@ def handle_user_request(user_input,ticket_id=None):
                     order_id = backorder_response.get("orderId") or backorder_response.get("tnOrderId", "N/A")
                     logger.info(f"📦 Backorder placed for remaining. Order ID: {order_id}")
                     results_text += f"\n📦 Backorder placed for remaining {remaining_quantity}. Order ID: {order_id}\n"
+                    
+                    # Add backorder to tracking database
+                    try:
+                        from backorder_tracker import get_backorder_tracker
+                        tracker = get_backorder_tracker()
+                        tracker.add_backorder(
+                            order_id=order_id,
+                            area_code=search_key,
+                            quantity=remaining_quantity,
+                            ticket_id=ticket_id
+                        )
+                        logger.info(f"✅ Backorder {order_id} added to tracking database")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to add backorder to tracking: {e}")
+                    
                     logger.info(f"📋 Final Backorder Summary: {json.dumps(iq_backorder_summary, indent=2)}")
 
                     iq_backorder_summary[search_key] = remaining_quantity
