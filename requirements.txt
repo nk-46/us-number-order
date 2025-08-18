@@ -26,6 +26,7 @@ openai==1.72.0
 pandas==2.2.3
 phonenumbers==9.0.2
 plivo==4.58.6
+psutil==6.1.0
 pydantic==2.11.3
 pydantic_core==2.33.1
 PyJWT==2.10.1

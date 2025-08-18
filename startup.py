@@ -1,83 +1,130 @@
 #!/usr/bin/env python3
 """
-Startup Script for Background Services
-Initializes and starts the backorder tracking service.
-
-ADDITIVE FEATURE:
-- Background service orchestration
-- Backorder tracking initialization
-- Process management and monitoring
+Startup monitoring service for US Number Order application.
+Monitors service health and provides status updates.
 """
 
 import os
-import sys
-import logging
-import signal
 import time
-from dotenv import load_dotenv
+import logging
+import logging.handlers
+import subprocess
+import psutil
+from datetime import datetime
 
-# Load environment variables
-load_dotenv(override=True)
-
-# Configure logging
-try:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler("/data/startup.log"),
-            logging.StreamHandler()
-        ]
+def setup_logging():
+    """Setup optimized logging with rotation"""
+    log_dir = "/data" if os.path.exists("/data") else "./data"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Create rotating file handler (5MB max, keep 2 files)
+    log_file = os.path.join(log_dir, "startup.log")
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, 
+        maxBytes=5*1024*1024,  # 5MB
+        backupCount=2,
+        encoding='utf-8'
     )
-except FileNotFoundError:
-    # Fallback for local development
-    os.makedirs("data", exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler("data/startup.log"),
-            logging.StreamHandler()
-        ]
+    
+    # Create console handler
+    console_handler = logging.StreamHandler()
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
     )
-logger = logging.getLogger(__name__)
+    
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # Configure logger
+    logger = logging.getLogger("startup_monitor")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
 
-def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully"""
-    logger.info("🛑 Received shutdown signal, stopping services...")
-    from backorder_tracker import stop_backorder_tracking
-    stop_backorder_tracking()
-    sys.exit(0)
+def get_system_stats():
+    """Get system statistics"""
+    try:
+        cpu_percent = psutil.cpu_percent(interval=1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        
+        return {
+            'cpu_percent': cpu_percent,
+            'memory_percent': memory.percent,
+            'memory_available_mb': memory.available / (1024 * 1024),
+            'disk_percent': disk.percent,
+            'disk_free_gb': disk.free / (1024 * 1024 * 1024)
+        }
+    except Exception as e:
+        logger.error(f"Error getting system stats: {e}")
+        return {}
+
+def check_process_health():
+    """Check if key processes are running"""
+    try:
+        # Check for Python processes
+        python_processes = []
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                if proc.info['name'] == 'python3' and proc.info['cmdline']:
+                    cmdline = ' '.join(proc.info['cmdline'])
+                    if any(script in cmdline for script in ['zendesk_webhook.py', 'backorder_tracker.py', 'startup.py']):
+                        python_processes.append({
+                            'pid': proc.info['pid'],
+                            'script': next((script for script in ['zendesk_webhook.py', 'backorder_tracker.py', 'startup.py'] if script in cmdline), 'unknown')
+                        })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        
+        return python_processes
+    except Exception as e:
+        logger.error(f"Error checking process health: {e}")
+        return []
 
 def main():
-    """Main startup function"""
-    logger.info("🚀 Starting US Number Order Automation System")
+    """Main monitoring loop"""
+    logger = setup_logging()
+    logger.info("🚀 Startup monitoring service started")
     
-    # Set up signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    check_count = 0
+    last_stats_log = 0
     
-    try:
-        # Import and start backorder tracking
-        from backorder_tracker import start_backorder_tracking
-        
-        logger.info("📊 Initializing backorder tracking service...")
-        start_backorder_tracking()
-        
-        logger.info("✅ All services started successfully")
-        logger.info("🔄 System is running. Press Ctrl+C to stop.")
-        
-        # Keep the main thread alive
-        while True:
-            time.sleep(60)  # Check every minute
+    while True:
+        try:
+            check_count += 1
             
-    except KeyboardInterrupt:
-        logger.info("🛑 Received keyboard interrupt")
-    except Exception as e:
-        logger.error(f"❌ Startup error: {e}")
-        sys.exit(1)
-    finally:
-        logger.info("🛑 Shutting down...")
+            # Get system stats every 10 checks (20 minutes)
+            if check_count % 10 == 0:
+                stats = get_system_stats()
+                if stats:
+                    logger.info(f"📊 System Stats - CPU: {stats['cpu_percent']:.1f}%, "
+                              f"Memory: {stats['memory_percent']:.1f}% ({stats['memory_available_mb']:.0f}MB), "
+                              f"Disk: {stats['disk_percent']:.1f}% ({stats['disk_free_gb']:.1f}GB free)")
+                    last_stats_log = check_count
+            
+            # Check process health every 5 checks (10 minutes)
+            if check_count % 5 == 0:
+                processes = check_process_health()
+                if processes:
+                    process_names = [p['script'] for p in processes]
+                    logger.info(f"✅ Process Health - Running: {', '.join(process_names)}")
+                else:
+                    logger.warning("⚠️ No expected processes found")
+            
+            # Sleep for 2 minutes between checks
+            time.sleep(120)
+            
+        except KeyboardInterrupt:
+            logger.info("🛑 Startup monitoring service stopped by user")
+            break
+        except Exception as e:
+            logger.error(f"❌ Error in monitoring loop: {e}")
+            time.sleep(60)  # Wait before retrying
 
 if __name__ == "__main__":
     main() 

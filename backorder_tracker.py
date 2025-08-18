@@ -15,6 +15,7 @@ import os
 import time
 import json
 import logging
+import logging.handlers
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -23,8 +24,42 @@ from dataclasses import dataclass
 
 from mcp_integration import InteliquentOrderTracker, process_completed_order
 
-# Configure logging
-logger = logging.getLogger(__name__)
+def setup_logging():
+    """Setup optimized logging with rotation"""
+    log_dir = "/data" if os.path.exists("/data") else "./data"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Create rotating file handler (5MB max, keep 2 files)
+    log_file = os.path.join(log_dir, "backorder_tracker.log")
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, 
+        maxBytes=5*1024*1024,  # 5MB
+        backupCount=2,
+        encoding='utf-8'
+    )
+    
+    # Create console handler
+    console_handler = logging.StreamHandler()
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # Configure logger
+    logger = logging.getLogger("backorder_tracker")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# Setup logging
+logger = setup_logging()
 
 @dataclass
 class BackorderRecord:
@@ -56,6 +91,7 @@ class BackorderTracker:
         self.tracker = InteliquentOrderTracker()
         self.running = False
         self.track_thread = None
+        self.last_status_log = 0  # Track when we last logged status
         
         # Initialize database
         self.init_db()
@@ -363,38 +399,53 @@ class BackorderTracker:
     
     def _tracking_loop(self):
         """Main tracking loop"""
+        check_count = 0
         while self.running:
             try:
+                check_count += 1
+                
                 # Get pending backorders
                 pending_backorders = self.get_pending_backorders()
                 
                 if pending_backorders:
-                    logger.info(f"🔍 Checking {len(pending_backorders)} pending backorders")
+                    # Only log status every 3 checks (12 hours) to reduce log volume
+                    if check_count % 3 == 0:
+                        logger.info(f"🔍 Checking {len(pending_backorders)} pending backorders")
                     
                     for backorder in pending_backorders:
                         # Check if backorder is older than 6 hours
                         if datetime.now() - backorder.created_at > timedelta(hours=6):
-                            logger.info(f"⏰ Checking backorder {backorder.order_id} (created {backorder.created_at})")
+                            # Only log detailed status every 6 checks (24 hours) for each backorder
+                            should_log = (check_count % 6 == 0)
+                            
+                            if should_log:
+                                logger.info(f"⏰ Checking backorder {backorder.order_id} (created {backorder.created_at})")
                             
                             # Get status from Inteliquent API
                             status_result = self.tracker.check_order_status(backorder.order_id)
                             
                             if "error" not in status_result:
-                                # Post status note every 4 hours
+                                # Post status note every 4 hours (every check)
                                 self.post_backorder_status_note(backorder, status_result)
                                 
                                 # Check if completed
                                 if status_result.get("status") == "completed":
                                     if self.check_backorder_completion(backorder):
                                         logger.info(f"✅ Backorder {backorder.order_id} completed!")
-                                    else:
+                                    elif should_log:
                                         logger.info(f"⏳ Backorder {backorder.order_id} still pending")
-                                else:
+                                elif should_log:
                                     logger.info(f"⏳ Backorder {backorder.order_id} still pending")
                             else:
                                 logger.warning(f"⚠️ Error checking backorder {backorder.order_id}: {status_result['error']}")
                         else:
-                            logger.debug(f"⏰ Backorder {backorder.order_id} too new, skipping")
+                            # Only log debug info every 12 checks (48 hours)
+                            if check_count % 12 == 0:
+                                logger.debug(f"⏰ Backorder {backorder.order_id} too new, skipping")
+                else:
+                    # Only log when no pending backorders every 6 checks (24 hours)
+                    if check_count % 6 == 0:
+                        logger.info("📋 No pending backorders to check")
                 
                 # Wait 4 hours before next check
                 time.sleep(14400)  # 4 hours

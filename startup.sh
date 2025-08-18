@@ -60,10 +60,6 @@ echo "🔍 Waiting for webhook server to be ready..."
 sleep 5
 
 # Start the main processing service (REMOVED - should only be called by webhook)
-# echo "⚙️ Starting main processing service..."
-# python3 main.py &
-# MAIN_PID=$!
-# echo "✅ Main processing service started with PID $MAIN_PID"
 echo "⚠️ Main processing service removed - should only be called by webhook"
 MAIN_PID=0
 
@@ -79,12 +75,20 @@ python3 startup.py &
 STARTUP_PID=$!
 echo "✅ Startup monitoring service started with PID $STARTUP_PID"
 
-# Monitor services in a loop
+# Monitor services in a loop with reduced frequency
 echo "🔄 Starting service monitoring loop..."
+health_check_count=0
 while true; do
-    sleep 30
+    # Check every 2 minutes instead of 30 seconds to reduce overhead
+    sleep 120
+    health_check_count=$((health_check_count + 1))
     
-    # Check external Redis
+    # Only log health status every 5 checks (10 minutes) to reduce log volume
+    if [ $((health_check_count % 5)) -eq 0 ]; then
+        echo "📊 Health check #$health_check_count - All services healthy"
+    fi
+    
+    # Check external Redis (critical - check every time)
     if ! redis-cli -h $REDIS_HOST -p $REDIS_PORT ping > /dev/null 2>&1; then
         echo "❌ External Redis connection lost! Attempting to reconnect..."
         sleep 5
@@ -94,31 +98,23 @@ while true; do
         fi
     fi
     
-    # Check webhook server
+    # Check webhook server (critical - check every time)
     if ! check_process $WEBHOOK_PID "Webhook Server"; then
         echo "💀 Webhook server died! This is critical - exiting..."
         exit 1
     fi
     
-    # Check main processing service (REMOVED - should only be called by webhook)
-    # if ! check_process $MAIN_PID "Main Processing Service"; then
-    #     echo "💀 Main processing service died! This is critical - exiting..."
-    #     exit 1
-    # fi
-    
-    # Check backorder tracker
+    # Check backorder tracker (non-critical - restart if needed)
     if ! check_process $BACKORDER_PID "Backorder Tracker"; then
         echo "⚠️ Backorder tracker died! Restarting..."
         restart_service "Backorder Tracker" "python3 backorder_tracker.py"
         BACKORDER_PID=$!
     fi
     
-    # Check startup monitoring service
+    # Check startup monitoring service (non-critical - restart if needed)
     if ! check_process $STARTUP_PID "Startup Monitoring Service"; then
         echo "⚠️ Startup monitoring service died! Restarting..."
         restart_service "Startup Monitoring Service" "python3 startup.py"
         STARTUP_PID=$!
     fi
-    
-    echo "📊 All services healthy - continuing monitoring..."
 done 

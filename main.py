@@ -4,22 +4,32 @@ import time
 import base64
 import requests
 import logging
+import logging.handlers
+import sys
 import json
-from dotenv import load_dotenv
-from openai import OpenAI
+import redis
+import openai
+from plivo import plivoxml
 from plivo import RestClient
+from flask import Flask, request, jsonify
+import threading
+import fcntl
+import tempfile
+import signal
+from datetime import datetime, timedelta
 from collections import defaultdict
 import phonenumbers
 from phonenumbers import parse, NumberParseException, region_code_for_number, geocoder
 
 # Load environment variables
+from dotenv import load_dotenv
 load_dotenv(override=True)
 
 # --------------------------- SETUP CLIENTS ---------------------------
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PROJECT_ID = os.getenv("OPENAI_PROJECT_ID")
-openai_client = OpenAI(api_key=OPENAI_API_KEY, project=PROJECT_ID)
+openai_client = openai.OpenAI(api_key=OPENAI_API_KEY, project=PROJECT_ID)
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 iq_trunk_group = os.getenv("IQ_TRUNK_GROUP")
 
@@ -48,17 +58,49 @@ iq_headers = {
     "Content-Type": "application/json"
 }
 
-# Configure logging
-LOG_FILE = "/data/us_ca_lc.log"
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# Configure logging with rotation and memory optimization
+def setup_logging():
+    """Setup optimized logging with rotation and memory management"""
+    log_dir = "/data" if os.path.exists("/data") else "./data"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Create rotating file handler (10MB max, keep 3 files)
+    log_file = os.path.join(log_dir, "us_ca_lc.log")
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, 
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=3,
+        encoding='utf-8'
+    )
+    
+    # Create console handler
+    console_handler = logging.StreamHandler()
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)  # Reduce from DEBUG to INFO
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    
+    # Reduce verbose logging from external libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    
+    return root_logger
+
+# Setup logging
+logger = setup_logging()
 
 # --------------------------- UTILITY FUNCTIONS ---------------------------
 
