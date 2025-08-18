@@ -17,8 +17,15 @@ primary_region = 'sjc'
   internal_port = 5000
   force_https = true
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ['app']
+
+[processes]
+  app = "./startup.sh"
+
+[env]
+  # Ensure services stay running
+  FLY_PROCESS_GROUP = "app"
 
 [[vm]]
   memory = '1gb'
