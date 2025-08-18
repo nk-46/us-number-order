@@ -424,4 +424,38 @@ def stop_backorder_tracking():
     if backorder_tracker:
         backorder_tracker.stop_tracking()
 
-# Note: Removed test code to prevent interference with production system 
+# Note: Removed test code to prevent interference with production system
+
+if __name__ == "__main__":
+    """Main entry point for backorder tracker"""
+    import signal
+    import sys
+    
+    def signal_handler(signum, frame):
+        """Handle shutdown signals gracefully"""
+        logger.info("🛑 Received shutdown signal, stopping backorder tracking...")
+        stop_backorder_tracking()
+        sys.exit(0)
+    
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        logger.info("🚀 Starting backorder tracking service...")
+        start_backorder_tracking()
+        
+        logger.info("✅ Backorder tracking service started successfully")
+        logger.info("🔄 Backorder tracking is running. Press Ctrl+C to stop.")
+        
+        # Keep the main thread alive
+        while True:
+            time.sleep(60)  # Check every minute
+            
+    except KeyboardInterrupt:
+        logger.info("🛑 Received keyboard interrupt")
+    except Exception as e:
+        logger.error(f"❌ Backorder tracking error: {e}")
+        sys.exit(1)
+    finally:
+        logger.info("🛑 Shutting down backorder tracking...") 
