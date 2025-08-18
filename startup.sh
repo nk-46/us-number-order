@@ -65,11 +65,13 @@ python3 main.py &
 MAIN_PID=$!
 echo "✅ Main processing service started with PID $MAIN_PID"
 
-# Start the backorder tracker
-echo "📦 Starting backorder tracker..."
-python3 backorder_tracker.py &
-BACKORDER_PID=$!
-echo "✅ Backorder tracker started with PID $BACKORDER_PID"
+# Start the backorder tracker (TEMPORARILY DISABLED - causing duplicate processing)
+# echo "📦 Starting backorder tracker..."
+# python3 backorder_tracker.py &
+# BACKORDER_PID=$!
+# echo "✅ Backorder tracker started with PID $BACKORDER_PID"
+echo "⚠️ Backorder tracker temporarily disabled to prevent duplicate processing"
+BACKORDER_PID=0
 
 # Start the startup monitoring service
 echo "🔍 Starting startup monitoring service..."
@@ -104,12 +106,12 @@ while true; do
         exit 1
     fi
     
-    # Check backorder tracker
-    if ! check_process $BACKORDER_PID "Backorder Tracker"; then
-        echo "⚠️ Backorder tracker died! Restarting..."
-        restart_service "Backorder Tracker" "python3 backorder_tracker.py"
-        BACKORDER_PID=$!
-    fi
+    # Check backorder tracker (TEMPORARILY DISABLED)
+    # if ! check_process $BACKORDER_PID "Backorder Tracker"; then
+    #     echo "⚠️ Backorder tracker died! Restarting..."
+    #     restart_service "Backorder Tracker" "python3 backorder_tracker.py"
+    #     BACKORDER_PID=$!
+    # fi
     
     # Check startup monitoring service
     if ! check_process $STARTUP_PID "Startup Monitoring Service"; then
