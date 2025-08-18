@@ -59,11 +59,13 @@ echo "✅ Webhook server started with PID $WEBHOOK_PID"
 echo "🔍 Waiting for webhook server to be ready..."
 sleep 5
 
-# Start the main processing service
-echo "⚙️ Starting main processing service..."
-python3 main.py &
-MAIN_PID=$!
-echo "✅ Main processing service started with PID $MAIN_PID"
+# Start the main processing service (REMOVED - should only be called by webhook)
+# echo "⚙️ Starting main processing service..."
+# python3 main.py &
+# MAIN_PID=$!
+# echo "✅ Main processing service started with PID $MAIN_PID"
+echo "⚠️ Main processing service removed - should only be called by webhook"
+MAIN_PID=0
 
 # Start the backorder tracker (TEMPORARILY DISABLED - causing duplicate processing)
 # echo "📦 Starting backorder tracker..."
@@ -100,11 +102,11 @@ while true; do
         exit 1
     fi
     
-    # Check main processing service
-    if ! check_process $MAIN_PID "Main Processing Service"; then
-        echo "💀 Main processing service died! This is critical - exiting..."
-        exit 1
-    fi
+    # Check main processing service (REMOVED - should only be called by webhook)
+    # if ! check_process $MAIN_PID "Main Processing Service"; then
+    #     echo "💀 Main processing service died! This is critical - exiting..."
+    #     exit 1
+    # fi
     
     # Check backorder tracker (TEMPORARILY DISABLED)
     # if ! check_process $BACKORDER_PID "Backorder Tracker"; then
