@@ -123,13 +123,17 @@ class MCPNumberInventory:
             # Prepare numbers data with minimal MCP structure
             numbers_data = []
             for number_info in numbers:
-                # Remove + prefix for MCP
-                number_without_plus = number_info.number
-                if number_without_plus.startswith("+"):
-                    number_without_plus = number_without_plus[1:]  # Remove + prefix
+                # Ensure number has 1 prefix for MCP (without +)
+                number_for_mcp = number_info.number
+                if number_for_mcp.startswith("+"):
+                    number_for_mcp = number_for_mcp[1:]  # Remove + prefix
+                
+                # Ensure number starts with 1 (US/Canada country code)
+                if not number_for_mcp.startswith("1"):
+                    number_for_mcp = "1" + number_for_mcp
                 
                 number_dict = {
-                    "number": number_without_plus,
+                    "number": number_for_mcp,
                     "number_type": number_info.number_type,
                     "voice_enabled": number_info.voice_enabled,
                     "sms_enabled": number_info.sms_enabled,
