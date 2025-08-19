@@ -63,15 +63,16 @@ logger = setup_logging()
 
 @dataclass
 class BackorderRecord:
-    """Data class for backorder tracking"""
+    """Data class for backorder records"""
     order_id: str
-    ticket_id: Optional[str]
     area_code: str
     quantity: int
+    ticket_id: str
+    status: str
     created_at: datetime
-    status: str = "pending"
-    completed_numbers: List[str] = None
-    completion_time: Optional[datetime] = None
+    updated_at: datetime
+    completion_date: Optional[datetime] = None
+    last_status: Optional[str] = None  # Track last known status for change detection
 
 class BackorderTracker:
     """Background tracker for Inteliquent backorders"""
@@ -110,8 +111,8 @@ class BackorderTracker:
                     quantity INTEGER,
                     created_at TEXT,
                     status TEXT DEFAULT 'pending',
-                    completed_numbers TEXT,
-                    completion_time TEXT
+                    updated_at TEXT,
+                    completion_date TEXT
                 )
             ''')
             
@@ -128,17 +129,20 @@ class BackorderTracker:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
+            current_time = datetime.now().isoformat()
+            
             cursor.execute('''
                 INSERT OR REPLACE INTO backorders 
-                (order_id, ticket_id, area_code, quantity, created_at, status)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (order_id, area_code, quantity, ticket_id, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (
                 order_id,
-                ticket_id,
                 area_code,
                 quantity,
-                datetime.now().isoformat(),
-                "pending"
+                ticket_id,
+                "pending",
+                current_time,
+                current_time
             ))
             
             conn.commit()
@@ -149,20 +153,20 @@ class BackorderTracker:
         except Exception as e:
             logger.error(f"❌ Failed to add backorder to tracking: {e}")
     
-    def update_backorder_status(self, order_id: str, status: str, completed_numbers: List[str] = None):
+    def update_backorder_status(self, order_id: str, status: str, completion_date: Optional[datetime] = None):
         """Update backorder status"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            completed_numbers_json = json.dumps(completed_numbers) if completed_numbers else None
-            completion_time = datetime.now().isoformat() if status == "completed" else None
+            current_time = datetime.now().isoformat()
+            completion_date_str = completion_date.isoformat() if completion_date else None
             
             cursor.execute('''
                 UPDATE backorders 
-                SET status = ?, completed_numbers = ?, completion_time = ?
+                SET status = ?, updated_at = ?, completion_date = ?
                 WHERE order_id = ?
-            ''', (status, completed_numbers_json, completion_time, order_id))
+            ''', (status, current_time, completion_date_str, order_id))
             
             conn.commit()
             conn.close()
@@ -179,26 +183,25 @@ class BackorderTracker:
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT order_id, ticket_id, area_code, quantity, created_at, status, 
-                       completed_numbers, completion_time
+                SELECT order_id, area_code, quantity, ticket_id, status, created_at, updated_at, completion_date
                 FROM backorders 
                 WHERE status = 'pending'
             ''')
             
             records = []
             for row in cursor.fetchall():
-                completed_numbers = json.loads(row[6]) if row[6] else []
-                completion_time = datetime.fromisoformat(row[7]) if row[7] else None
+                completion_date = datetime.fromisoformat(row[7]) if row[7] else None
                 
                 record = BackorderRecord(
                     order_id=row[0],
-                    ticket_id=row[1],
-                    area_code=row[2],
-                    quantity=row[3],
-                    created_at=datetime.fromisoformat(row[4]),
-                    status=row[5],
-                    completed_numbers=completed_numbers,
-                    completion_time=completion_time
+                    area_code=row[1],
+                    quantity=row[2],
+                    ticket_id=row[3],
+                    status=row[4],
+                    created_at=datetime.fromisoformat(row[5]),
+                    updated_at=datetime.fromisoformat(row[6]),
+                    completion_date=completion_date,
+                    last_status=None  # Will be set during tracking
                 )
                 records.append(record)
             
@@ -237,7 +240,7 @@ class BackorderTracker:
         
         if order_status == "Closed":
             note += "✅ This backorder has been completed!\n"
-            note += "Numbers have been added to inventory via MCP integration.\n"
+            note += "Processing numbers for inventory addition...\n"  # Changed: Don't claim MCP integration yet
         elif order_status == "pending":
             note += "📋 This backorder is still being processed by our carrier.\n"
             note += "We'll continue monitoring and update you when numbers become available.\n"
@@ -297,7 +300,7 @@ class BackorderTracker:
                     self.update_backorder_status(
                         backorder.order_id, 
                         "completed", 
-                        completed_numbers
+                        datetime.now() # Set completion date to now
                     )
                     
                     # Process completed numbers via MCP
@@ -379,6 +382,23 @@ class BackorderTracker:
         except Exception as e:
             logger.error(f"❌ Failed to update Zendesk ticket: {e}")
     
+    def remove_completed_backorder(self, order_id: str):
+        """Remove a completed backorder from tracking"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                DELETE FROM backorders WHERE order_id = ?
+            ''', (order_id,))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"📝 Removed completed backorder {order_id} from tracking")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to remove completed backorder {order_id}: {e}")
+    
     def start_tracking(self):
         """Start background tracking of backorders"""
         if self.running:
@@ -398,8 +418,10 @@ class BackorderTracker:
         logger.info("🛑 Stopped backorder tracking")
     
     def _tracking_loop(self):
-        """Main tracking loop"""
+        """Main tracking loop - Optimized for frequent checking with minimal logging"""
         check_count = 0
+        last_status_updates = {}  # Track last status update time per backorder
+        
         while self.running:
             try:
                 check_count += 1
@@ -408,47 +430,66 @@ class BackorderTracker:
                 pending_backorders = self.get_pending_backorders()
                 
                 if pending_backorders:
-                    # Only log status every 3 checks (12 hours) to reduce log volume
-                    if check_count % 3 == 0:
-                        logger.info(f"🔍 Checking {len(pending_backorders)} pending backorders")
+                    # Only log summary every 60 checks (10 hours) to reduce log volume
+                    if check_count % 60 == 0:
+                        logger.info(f"🔍 Monitoring {len(pending_backorders)} pending backorders")
                     
                     for backorder in pending_backorders:
-                        # Check if backorder is older than 6 hours
-                        if datetime.now() - backorder.created_at > timedelta(hours=6):
-                            # Only log detailed status every 6 checks (24 hours) for each backorder
-                            should_log = (check_count % 6 == 0)
+                        # Check ALL backorders regardless of age (frequent monitoring)
+                        current_time = datetime.now()
+                        
+                        # Get status from Inteliquent API (no logging for routine checks)
+                        status_result = self.tracker.check_order_status(backorder.order_id)
+                        
+                        if "error" not in status_result:
+                            # Extract order details
+                            order_detail = status_result.get("orderDetailResponse", {})
+                            current_status = order_detail.get("orderStatus", "unknown")
                             
-                            if should_log:
-                                logger.info(f"⏰ Checking backorder {backorder.order_id} (created {backorder.created_at})")
+                            # Check if status has changed
+                            status_changed = False
+                            if hasattr(backorder, 'last_status') and backorder.last_status != current_status:
+                                status_changed = True
+                                logger.info(f"🔄 Status change detected for backorder {backorder.order_id}: {backorder.last_status} → {current_status}")
                             
-                            # Get status from Inteliquent API
-                            status_result = self.tracker.check_order_status(backorder.order_id)
+                            # Store current status for next comparison
+                            backorder.last_status = current_status
                             
-                            if "error" not in status_result:
-                                # Post status note every 4 hours (every check)
+                            # Check if completed
+                            if current_status == "Closed":
+                                if self.check_backorder_completion(backorder):
+                                    logger.info(f"✅ Backorder {backorder.order_id} completed!")
+                                    # Remove from tracking after completion
+                                    self.remove_completed_backorder(backorder.order_id)
+                                else:
+                                    logger.warning(f"⚠️ Order {backorder.order_id} is closed but no completed numbers found")
+                            
+                            # Post status update to Zendesk every 4 hours (regardless of status change)
+                            last_update = last_status_updates.get(backorder.order_id)
+                            should_update_ticket = (
+                                last_update is None or 
+                                (current_time - last_update).total_seconds() >= 14400  # 4 hours
+                            )
+                            
+                            if should_update_ticket:
                                 self.post_backorder_status_note(backorder, status_result)
+                                last_status_updates[backorder.order_id] = current_time
+                                logger.info(f"📝 Posted 4-hour status update for backorder {backorder.order_id}")
+                            
+                            # Log only on status changes (not routine checks)
+                            if status_changed:
+                                logger.info(f"📊 Backorder {backorder.order_id} status: {current_status}")
                                 
-                                # Check if completed
-                                if status_result.get("status") == "completed":
-                                    if self.check_backorder_completion(backorder):
-                                        logger.info(f"✅ Backorder {backorder.order_id} completed!")
-                                    elif should_log:
-                                        logger.info(f"⏳ Backorder {backorder.order_id} still pending")
-                                elif should_log:
-                                    logger.info(f"⏳ Backorder {backorder.order_id} still pending")
-                            else:
-                                logger.warning(f"⚠️ Error checking backorder {backorder.order_id}: {status_result['error']}")
                         else:
-                            # Only log debug info every 12 checks (48 hours)
-                            if check_count % 12 == 0:
-                                logger.debug(f"⏰ Backorder {backorder.order_id} too new, skipping")
+                            # Only log API errors (important for debugging)
+                            logger.warning(f"⚠️ Error checking backorder {backorder.order_id}: {status_result['error']}")
                 else:
-                    # Only log when no pending backorders every 6 checks (24 hours)
-                    if check_count % 6 == 0:
-                        logger.info("📋 No pending backorders to check")
+                    # Only log when no pending backorders every 60 checks (10 hours)
+                    if check_count % 60 == 0:
+                        logger.info("📋 No pending backorders to monitor")
                 
-                # Wait 4 hours before next check
-                time.sleep(14400)  # 4 hours
+                # Wait 10 minutes before next check (frequent monitoring)
+                time.sleep(600)  # 10 minutes
                 
             except Exception as e:
                 logger.error(f"❌ Exception in tracking loop: {e}")
