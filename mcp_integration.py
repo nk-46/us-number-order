@@ -160,8 +160,9 @@ class MCPNumberInventory:
                 }
             }
             
-            logger.info(f"📤 Sending {len(numbers)} numbers to MCP server")
-            logger.info(f"📋 Payload: {json.dumps(payload, indent=2)}")
+            print(f"📤 Sending {len(numbers)} numbers to MCP server")
+            print(f"📋 MCP Request Payload:")
+            print(json.dumps(payload, indent=2))
             
             # Make request to MCP server
             response = requests.post(
@@ -172,11 +173,12 @@ class MCPNumberInventory:
                 timeout=30
             )
             
-            logger.info(f"📥 MCP Response Status: {response.status_code}")
+            print(f"📥 MCP Response Status: {response.status_code}")
             
             if response.status_code == 200:
                 response_data = response.json()
-                logger.info(f"✅ MCP request successful: {response_data}")
+                print(f"✅ MCP Response Payload:")
+                print(json.dumps(response_data, indent=2))
                 
                 return {
                     'success': True,
@@ -184,7 +186,7 @@ class MCPNumberInventory:
                     'numbers_added': [num.number for num in numbers]
                 }
             else:
-                logger.error(f"❌ MCP request failed: {response.status_code} - {response.text}")
+                print(f"❌ MCP request failed: {response.status_code} - {response.text}")
                 return {
                     'success': False,
                     'error': f"HTTP {response.status_code}: {response.text}",
@@ -192,13 +194,13 @@ class MCPNumberInventory:
                 }
                 
         except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Network error calling MCP server: {e}")
+            print(f"❌ Network error calling MCP server: {e}")
             return {
                 'success': False,
                 'error': f"Network error: {str(e)}"
             }
         except Exception as e:
-            logger.error(f"❌ Unexpected error calling MCP server: {e}")
+            print(f"❌ Unexpected error calling MCP server: {e}")
             return {
                 'success': False,
                 'error': f"Unexpected error: {str(e)}"
@@ -442,6 +444,8 @@ def update_zendesk_with_mcp_status(ticket_id: str, mcp_result: Dict, numbers_add
 🔗 Order ID: {mcp_result['order_id']}
 📋 MCP Log ID: {log_identifier}
 💬 MCP Message: {mcp_message}
+🔄 MCP Status: {mcp_response.get('status', 'N/A')}
+⏰ MCP Timestamp: {inner_response.get('timestamp', 'N/A')}
             """
             
             # Add failed numbers details if any

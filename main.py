@@ -462,6 +462,67 @@ def handle_user_request(user_input,ticket_id=None):
                     logger.info(f"✅ Ordered {len(total_results)} numbers for area code {area_code}")
                     print(json.dumps(order_response, indent=5))
                     results_text += f"\n\n{order_response}"
+                    
+                    # 🔄 Add MCP integration for immediate orders
+                    try:
+                        from mcp_integration import MCPNumberInventory, NumberInfo, get_region_id_from_area_code, update_zendesk_with_mcp_status
+                        import os
+                        
+                        mcp_client = MCPNumberInventory()
+                        successful_additions = []
+                        failed_additions = []
+                        
+                        for tn in total_results:
+                            number = tn.get("telephoneNumber")
+                            area_code = number[:3]
+                            region_id = get_region_id_from_area_code(area_code)
+                            carrier_tier_id = int(os.getenv('MCP_CARRIER_TIER_US', '10000252')) if region_id == 101 else int(os.getenv('MCP_CARRIER_TIER_CA', '10000253'))
+                            
+                            number_info = NumberInfo(
+                                number=number,
+                                carrier_id=os.getenv('MCP_CARRIER_ID'),
+                                carrier_tier_id=carrier_tier_id,
+                                region_id=region_id
+                            )
+                            
+                            result = mcp_client.add_numbers_to_inventory(
+                                numbers=[number_info],
+                                user_email=os.getenv('MCP_USER_EMAIL', 'kiran.a@plivo.com'),
+                                skip_number_testing=True,
+                                reason_skip_number_testing=f"Immediate order for ticket {ticket_id}"
+                            )
+                            
+                            if result.get('success'):
+                                successful_additions.append(number)
+                                logger.info(f"✅ Added {number} to inventory via MCP")
+                            else:
+                                failed_additions.append({
+                                    'number': number,
+                                    'error': result.get('error', 'Unknown error')
+                                })
+                                logger.error(f"❌ Failed to add {number} to inventory: {result.get('error')}")
+                        
+                        # Prepare MCP result for Zendesk update
+                        mcp_result = {
+                            'order_id': order_response.get('orderId', 'N/A'),
+                            'total_numbers': len(total_results),
+                            'successful_additions': successful_additions,
+                            'failed_additions': failed_additions,
+                            'ticket_id': ticket_id
+                        }
+                        
+                        # Update Zendesk with MCP status
+                        if ticket_id:
+                            update_zendesk_with_mcp_status(
+                                ticket_id=ticket_id,
+                                mcp_result=mcp_result,
+                                numbers_added=successful_additions
+                            )
+                            logger.info(f"✅ MCP integration completed for immediate order - {len(successful_additions)} successful, {len(failed_additions)} failed")
+                        
+                    except Exception as e:
+                        logger.error(f"⚠️ MCP integration failed for immediate order: {e}")
+                        
                 except Exception as e:
                     print(f"Failed to order numbers {e}")
 
