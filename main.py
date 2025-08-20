@@ -596,10 +596,22 @@ def handle_user_request(user_input,ticket_id=None):
 
 
     print(f"Public text: {public_text}")
-    print(f"Prefix: {search_key}")
+    
+    # Handle case where no numbers were processed (search_key might not be defined)
+    if 'search_key' not in locals():
+        search_key = "N/A"
+        print(f"Prefix: {search_key} (no numbers processed)")
+    else:
+        print(f"Prefix: {search_key}")
+    
     print(f"Ordered numbers: {ordered_number_details}")
     internal_comment = full_output + results_text.strip()
     print(f"Internal comment: {internal_comment}")
+    
+    # Handle backorder_response variable
+    if 'backorder_response' not in locals():
+        backorder_response = "N/A"
+    
     print(f"Backorder response: {backorder_response}")
     return {
         "skip_update": False,
