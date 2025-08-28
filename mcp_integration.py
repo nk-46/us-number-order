@@ -1,13 +1,43 @@
 #!/usr/bin/env python3
 """
-MCP (Model Context Protocol) Integration for Number Inventory
-Handles adding numbers to inventory via MCP server with circuit breaker pattern.
+MCP (Model Context Protocol) Integration for Number Inventory Management
+Handles adding numbers to inventory and blocking numbers via MCP server.
 
-ADDITIVE FEATURE:
+CORE FEATURES:
 - Automated number inventory management via MCP
-- Circuit breaker for API reliability
+- Circuit breaker pattern for API reliability
 - Sequential processing for MCP server limitations
 - Region detection for US/Canada numbers
+
+ADDITIVE FEATURE - NUMBER BLOCKING INTEGRATION:
+- Automatic number blocking after successful inventory addition
+- Individual number processing to avoid MCP server limitations
+- Comprehensive error handling and tracking
+- Enhanced Zendesk notes with blocking results
+- Backward compatible - no breaking changes to existing workflows
+
+BLOCKING WORKFLOW:
+1. Number is added to inventory via MCP
+2. If inventory addition succeeds → Block the number
+3. If inventory addition fails → Skip blocking for that number
+4. Track success/failure for both operations separately
+5. Report comprehensive results in Zendesk notes
+
+INTEGRATION POINTS:
+- process_completed_order(): Enhanced to include blocking after inventory addition
+- update_zendesk_with_mcp_status(): Enhanced to show blocking results
+- block_numbers(): New method for individual number blocking
+
+SAFETY FEATURES:
+- Blocking failures don't affect successful inventory additions
+- Individual number processing isolation
+- Comprehensive error tracking and reporting
+- Graceful degradation if blocking fails
+- No impact on existing immediate order workflows
+
+Author: Development Team
+Last Updated: August 28, 2025
+Version: 2.0 (with blocking integration)
 """
 
 import os
@@ -208,14 +238,37 @@ class MCPNumberInventory:
 
     def block_numbers(self, numbers: List[str], user_email: str = "kiran.a@plivo.com") -> Dict:
         """
-        Block numbers using MCP server (one at a time)
+        Block phone numbers using MCP (Model Context Protocol) server.
+        
+        This method processes numbers individually to ensure reliable blocking and proper
+        error handling for each number. It follows the exact API format that works with
+        the MCP server, matching the successful Postman implementation.
+        
+        BLOCKING WORKFLOW:
+        1. Format each number to MCP requirements (1 prefix, no +)
+        2. Create individual API payload for each number
+        3. Make sequential API calls to avoid "numbers list must contain exactly one number" error
+        4. Track success/failure for each number separately
+        5. Return comprehensive results with detailed error information
         
         Args:
-            numbers: List of phone numbers to block
-            user_email: Email of the user requesting the block
+            numbers: List of phone numbers to block (can include +1, 1, or no prefix)
+            user_email: Email of the user requesting the block operation
             
         Returns:
-            Dict with success status and response details
+            Dict containing:
+                - success: Boolean indicating if any numbers were successfully blocked
+                - successful_blocks: List of successfully blocked numbers
+                - failed_blocks: List of failed blocks with error details
+                - total_processed: Total number of numbers processed
+                - total_successful: Count of successful blocks
+                - total_failed: Count of failed blocks
+                
+        Example:
+            >>> mcp_client = MCPNumberInventory()
+            >>> result = mcp_client.block_numbers(['+19153541060', '9153541061'])
+            >>> print(result['successful_blocks'])  # ['+19153541060', '9153541061']
+            >>> print(result['failed_blocks'])      # []
         """
         try:
             successful_blocks = []
@@ -225,7 +278,8 @@ class MCPNumberInventory:
             
             for number in numbers:
                 try:
-                    # Ensure number has 1 prefix for MCP (without +)
+                    # STEP 1: Format number for MCP API requirements
+                    # MCP expects: "19153541060" (1 prefix, no + symbol)
                     number_for_mcp = number
                     if number_for_mcp.startswith("+"):
                         number_for_mcp = number_for_mcp[1:]  # Remove + prefix
@@ -234,13 +288,14 @@ class MCPNumberInventory:
                     if not number_for_mcp.startswith("1"):
                         number_for_mcp = "1" + number_for_mcp
                     
-                    # Prepare payload for single number blocking (using exact Postman format)
+                    # STEP 2: Create API payload for single number blocking
+                    # This matches the exact format that works in Postman
                     payload = json.dumps({
                         "query": "block numbers",
                         "raw_args": {
                             "numbers": [
                                 {
-                                    "number": number_for_mcp,
+                                    "number": number_for_mcp,  # e.g., "19153541060"
                                     "operation": "block"
                                 }
                             ],
@@ -252,7 +307,9 @@ class MCPNumberInventory:
                     print(f"📋 MCP Block Request Payload:")
                     print(payload)
                     
-                    # Make request to MCP server using exact Postman format
+                    # STEP 3: Make API request with proper authentication
+                    # Using requests.request() with data=payload (not json=payload)
+                    # This ensures exact byte-for-byte match with Postman requests
                     headers = {
                         'Content-Type': 'application/json',
                         'Authorization': f'Basic {base64.b64encode(f"{self.mcp_username}:{self.mcp_password}".encode()).decode()}'
@@ -262,12 +319,13 @@ class MCPNumberInventory:
                         "POST",
                         self.mcp_url,
                         headers=headers,
-                        data=payload,
+                        data=payload,  # Use data= not json= for exact Postman match
                         timeout=30
                     )
                     
                     print(f"📥 MCP Block Response Status: {response.status_code}")
                     
+                    # STEP 4: Process response and track results
                     if response.status_code == 200:
                         response_data = response.json()
                         print(f"✅ MCP Block Response Payload:")
@@ -278,6 +336,7 @@ class MCPNumberInventory:
                             successful_blocks.append(number)
                             print(f"✅ Successfully blocked {number}")
                         else:
+                            # Extract error message from MCP response
                             error_msg = response_data.get('response', {}).get('error', 'Unknown error')
                             failed_blocks.append({
                                 'number': number,
@@ -285,6 +344,7 @@ class MCPNumberInventory:
                             })
                             print(f"❌ Failed to block {number}: {error_msg}")
                     else:
+                        # Handle HTTP errors (4xx, 5xx)
                         error_msg = f"HTTP {response.status_code}: {response.text}"
                         failed_blocks.append({
                             'number': number,
@@ -293,6 +353,7 @@ class MCPNumberInventory:
                         print(f"❌ MCP block request failed for {number}: {error_msg}")
                         
                 except Exception as e:
+                    # Handle any unexpected exceptions during processing
                     error_msg = f"Exception: {str(e)}"
                     failed_blocks.append({
                         'number': number,
@@ -300,17 +361,18 @@ class MCPNumberInventory:
                     })
                     print(f"❌ Error blocking {number}: {error_msg}")
             
-            # Return comprehensive result
+            # STEP 5: Return comprehensive results
             return {
-                'success': len(successful_blocks) > 0,
-                'successful_blocks': successful_blocks,
-                'failed_blocks': failed_blocks,
-                'total_processed': len(numbers),
-                'total_successful': len(successful_blocks),
-                'total_failed': len(failed_blocks)
+                'success': len(successful_blocks) > 0,  # True if at least one number was blocked
+                'successful_blocks': successful_blocks,  # List of successfully blocked numbers
+                'failed_blocks': failed_blocks,          # List of failed blocks with error details
+                'total_processed': len(numbers),         # Total numbers processed
+                'total_successful': len(successful_blocks),  # Count of successful blocks
+                'total_failed': len(failed_blocks)       # Count of failed blocks
             }
                 
         except Exception as e:
+            # Handle any unexpected errors at the method level
             print(f"❌ Unexpected error in block_numbers: {e}")
             return {
                 'success': False,
@@ -450,6 +512,7 @@ def process_completed_order(order_id: str, completed_numbers: List[str], user_em
         
         for number in completed_numbers:
             try:
+                # STEP 1: Add number to inventory via MCP
                 # Extract area code from the number
                 if number.startswith('+1'):
                     number_without_country = number[2:]  # Remove +1
@@ -488,7 +551,9 @@ def process_completed_order(order_id: str, completed_numbers: List[str], user_em
                     successful_additions.append(number)
                     logger.info(f"✅ Successfully added {number} to inventory")
                     
-                    # Block the number after successful addition to inventory
+                    # STEP 2: Block the number after successful inventory addition
+                    # This is the ADDITIVE FEATURE - blocking happens only after successful inventory addition
+                    # If inventory addition fails, blocking is skipped for that number
                     block_result = mcp_client.block_numbers(
                         numbers=[number],
                         user_email=user_email
@@ -500,9 +565,11 @@ def process_completed_order(order_id: str, completed_numbers: List[str], user_em
                         logger.info(f"🚫 Successfully blocked {number} after inventory addition")
                     else:
                         # Add failed blocks to the list
+                        # Note: Blocking failure doesn't affect the successful inventory addition
                         failed_blocks.extend(block_result.get('failed_blocks', []))
                         logger.warning(f"⚠️ Failed to block {number} after inventory addition")
                 else:
+                    # If inventory addition fails, skip blocking entirely
                     failed_additions.append({
                         'number': number,
                         'error': result.get('error', 'Unknown error')
@@ -516,14 +583,14 @@ def process_completed_order(order_id: str, completed_numbers: List[str], user_em
                 })
                 logger.error(f"❌ Error processing number {number}: {e}")
         
-        # Prepare result
+        # STEP 3: Prepare comprehensive result with both inventory and blocking results
         result = {
             'order_id': order_id,
             'total_numbers': len(completed_numbers),
-            'successful_additions': successful_additions,
-            'failed_additions': failed_additions,
-            'successful_blocks': successful_blocks,
-            'failed_blocks': failed_blocks,
+            'successful_additions': successful_additions,  # Numbers successfully added to inventory
+            'failed_additions': failed_additions,          # Numbers that failed inventory addition
+            'successful_blocks': successful_blocks,        # Numbers successfully blocked (ADDITIVE)
+            'failed_blocks': failed_blocks,                # Numbers that failed blocking (ADDITIVE)
             'ticket_id': ticket_id
         }
         
@@ -613,7 +680,7 @@ def update_zendesk_with_mcp_status(ticket_id: str, mcp_result: Dict, numbers_add
             internal_comment = f"""
 ❌ MCP Integration Failed - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-🚨 Error: {mcp_result['error']}
+�� Error: {mcp_result['error']}
 
 🔗 Order ID: {mcp_result.get('order_id', 'N/A')}
             """
