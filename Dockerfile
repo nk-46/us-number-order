@@ -7,15 +7,29 @@ RUN apt-get update && apt-get install -y redis-tools && rm -rf /var/lib/apt/list
 # Set working directory
 WORKDIR /app
 
-# Install dependencies
+# Copy requirements first for better layer caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
-COPY . .
+# Install dependencies with optimizations
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy only necessary files (exclude test files and backups)
+COPY main.py .
+COPY mcp_integration.py .
+COPY backorder_tracker.py .
+COPY zendesk_webhook.py .
+COPY startup.py .
+COPY startup.sh .
+COPY fly.toml .
+COPY CHANGELOG.md .
+COPY README.md .
 
 # Make startup script executable
 RUN chmod +x startup.sh
+
+# Create data directory
+RUN mkdir -p /data
 
 # Expose port
 EXPOSE 5000
