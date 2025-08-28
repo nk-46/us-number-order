@@ -7,6 +7,8 @@ app = 'number-order-us'
 primary_region = 'sjc'
 
 [build]
+  dockerfile = "Dockerfile"
+  ignorefile = ".dockerignore"
 
 [[mounts]]
   source = 'data'
