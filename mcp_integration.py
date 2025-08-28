@@ -206,6 +206,119 @@ class MCPNumberInventory:
                 'error': f"Unexpected error: {str(e)}"
             }
 
+    def block_numbers(self, numbers: List[str], user_email: str = "kiran.a@plivo.com") -> Dict:
+        """
+        Block numbers using MCP server (one at a time)
+        
+        Args:
+            numbers: List of phone numbers to block
+            user_email: Email of the user requesting the block
+            
+        Returns:
+            Dict with success status and response details
+        """
+        try:
+            successful_blocks = []
+            failed_blocks = []
+            
+            print(f"🚫 Processing {len(numbers)} numbers for blocking (one at a time)")
+            
+            for number in numbers:
+                try:
+                    # Ensure number has 1 prefix for MCP (without +)
+                    number_for_mcp = number
+                    if number_for_mcp.startswith("+"):
+                        number_for_mcp = number_for_mcp[1:]  # Remove + prefix
+                    
+                    # Ensure number starts with 1 (US/Canada country code)
+                    if not number_for_mcp.startswith("1"):
+                        number_for_mcp = "1" + number_for_mcp
+                    
+                    # Prepare payload for single number blocking (using exact Postman format)
+                    payload = json.dumps({
+                        "query": "block numbers",
+                        "raw_args": {
+                            "numbers": [
+                                {
+                                    "number": number_for_mcp,
+                                    "operation": "block"
+                                }
+                            ],
+                            "email_id": user_email
+                        }
+                    })
+                    
+                    print(f"🚫 Blocking number: {number_for_mcp}")
+                    print(f"📋 MCP Block Request Payload:")
+                    print(payload)
+                    
+                    # Make request to MCP server using exact Postman format
+                    headers = {
+                        'Content-Type': 'application/json',
+                        'Authorization': f'Basic {base64.b64encode(f"{self.mcp_username}:{self.mcp_password}".encode()).decode()}'
+                    }
+                    
+                    response = requests.request(
+                        "POST",
+                        self.mcp_url,
+                        headers=headers,
+                        data=payload,
+                        timeout=30
+                    )
+                    
+                    print(f"📥 MCP Block Response Status: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        response_data = response.json()
+                        print(f"✅ MCP Block Response Payload:")
+                        print(json.dumps(response_data, indent=2))
+                        
+                        # Check if the response indicates success
+                        if response_data.get('status') == 'success':
+                            successful_blocks.append(number)
+                            print(f"✅ Successfully blocked {number}")
+                        else:
+                            error_msg = response_data.get('response', {}).get('error', 'Unknown error')
+                            failed_blocks.append({
+                                'number': number,
+                                'error': error_msg
+                            })
+                            print(f"❌ Failed to block {number}: {error_msg}")
+                    else:
+                        error_msg = f"HTTP {response.status_code}: {response.text}"
+                        failed_blocks.append({
+                            'number': number,
+                            'error': error_msg
+                        })
+                        print(f"❌ MCP block request failed for {number}: {error_msg}")
+                        
+                except Exception as e:
+                    error_msg = f"Exception: {str(e)}"
+                    failed_blocks.append({
+                        'number': number,
+                        'error': error_msg
+                    })
+                    print(f"❌ Error blocking {number}: {error_msg}")
+            
+            # Return comprehensive result
+            return {
+                'success': len(successful_blocks) > 0,
+                'successful_blocks': successful_blocks,
+                'failed_blocks': failed_blocks,
+                'total_processed': len(numbers),
+                'total_successful': len(successful_blocks),
+                'total_failed': len(failed_blocks)
+            }
+                
+        except Exception as e:
+            print(f"❌ Unexpected error in block_numbers: {e}")
+            return {
+                'success': False,
+                'error': f"Unexpected error: {str(e)}",
+                'successful_blocks': [],
+                'failed_blocks': []
+            }
+
 class InteliquentOrderTracker:
     """Track Inteliquent order status"""
     
@@ -332,6 +445,8 @@ def process_completed_order(order_id: str, completed_numbers: List[str], user_em
         # Process each number
         successful_additions = []
         failed_additions = []
+        successful_blocks = []
+        failed_blocks = []
         
         for number in completed_numbers:
             try:
@@ -372,6 +487,21 @@ def process_completed_order(order_id: str, completed_numbers: List[str], user_em
                 if result.get('success'):
                     successful_additions.append(number)
                     logger.info(f"✅ Successfully added {number} to inventory")
+                    
+                    # Block the number after successful addition to inventory
+                    block_result = mcp_client.block_numbers(
+                        numbers=[number],
+                        user_email=user_email
+                    )
+                    
+                    if block_result.get('success'):
+                        # Add successfully blocked numbers to the list
+                        successful_blocks.extend(block_result.get('successful_blocks', []))
+                        logger.info(f"🚫 Successfully blocked {number} after inventory addition")
+                    else:
+                        # Add failed blocks to the list
+                        failed_blocks.extend(block_result.get('failed_blocks', []))
+                        logger.warning(f"⚠️ Failed to block {number} after inventory addition")
                 else:
                     failed_additions.append({
                         'number': number,
@@ -392,10 +522,12 @@ def process_completed_order(order_id: str, completed_numbers: List[str], user_em
             'total_numbers': len(completed_numbers),
             'successful_additions': successful_additions,
             'failed_additions': failed_additions,
+            'successful_blocks': successful_blocks,
+            'failed_blocks': failed_blocks,
             'ticket_id': ticket_id
         }
         
-        logger.info(f"📊 Order processing complete: {len(successful_additions)} successful, {len(failed_additions)} failed")
+        logger.info(f"📊 Order processing complete: {len(successful_additions)} successful additions, {len(failed_additions)} failed additions, {len(successful_blocks)} successful blocks, {len(failed_blocks)} failed blocks")
         
         return result
         
@@ -435,11 +567,20 @@ def update_zendesk_with_mcp_status(ticket_id: str, mcp_result: Dict, numbers_add
 ✅ Numbers Successfully Added to Inventory:
 {', '.join(mcp_result['successful_additions'])}
 
+🚫 BLOCKING RESULTS:
+✅ Successfully Blocked Numbers:
+{', '.join(mcp_result.get('successful_blocks', [])) if mcp_result.get('successful_blocks') else 'None'}
+
+❌ Failed to Block Numbers:
+{', '.join([failed['number'] for failed in mcp_result.get('failed_blocks', [])]) if mcp_result.get('failed_blocks') else 'None'}
+
 📊 Summary:
 - Total Numbers: {mcp_result['total_numbers']}
-- Successful: {len(mcp_result['successful_additions'])}
-- Failed: {len(mcp_result.get('failed_additions', []))}
+- Successful Additions: {len(mcp_result['successful_additions'])}
+- Failed Additions: {len(mcp_result.get('failed_additions', []))}
 - Numbers Processed: {numbers_processed}
+- Successfully Blocked: {len(mcp_result.get('successful_blocks', []))}
+- Failed to Block: {len(mcp_result.get('failed_blocks', []))}
 
 🔗 Order ID: {mcp_result['order_id']}
 📋 MCP Log ID: {log_identifier}
@@ -450,8 +591,14 @@ def update_zendesk_with_mcp_status(ticket_id: str, mcp_result: Dict, numbers_add
             
             # Add failed numbers details if any
             if mcp_result.get('failed_additions'):
-                internal_comment += f"\n❌ Failed Numbers:\n"
+                internal_comment += f"\n❌ Failed Additions:\n"
                 for failed in mcp_result['failed_additions']:
+                    internal_comment += f"- {failed['number']}: {failed['error']}\n"
+            
+            # Add failed blocks details if any
+            if mcp_result.get('failed_blocks'):
+                internal_comment += f"\n⚠️ Failed Blocks:\n"
+                for failed in mcp_result['failed_blocks']:
                     internal_comment += f"- {failed['number']}: {failed['error']}\n"
             
             post_zendesk_comment(
@@ -483,18 +630,33 @@ def update_zendesk_with_mcp_status(ticket_id: str, mcp_result: Dict, numbers_add
             internal_comment = f"""
 ⚠️ MCP Integration Partial Success - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
+🚫 BLOCKING RESULTS:
+✅ Successfully Blocked Numbers:
+{', '.join(mcp_result.get('successful_blocks', [])) if mcp_result.get('successful_blocks') else 'None'}
+
+❌ Failed to Block Numbers:
+{', '.join([failed['number'] for failed in mcp_result.get('failed_blocks', [])]) if mcp_result.get('failed_blocks') else 'None'}
+
 📊 Summary:
 - Total Numbers: {mcp_result.get('total_numbers', 0)}
-- Successful: {len(mcp_result.get('successful_additions', []))}
-- Failed: {len(mcp_result.get('failed_additions', []))}
+- Successful Additions: {len(mcp_result.get('successful_additions', []))}
+- Failed Additions: {len(mcp_result.get('failed_additions', []))}
+- Successfully Blocked: {len(mcp_result.get('successful_blocks', []))}
+- Failed to Block: {len(mcp_result.get('failed_blocks', []))}
 
 🔗 Order ID: {mcp_result.get('order_id', 'N/A')}
             """
             
             # Add failed numbers details if any
             if mcp_result.get('failed_additions'):
-                internal_comment += f"\n❌ Failed Numbers:\n"
+                internal_comment += f"\n❌ Failed Additions:\n"
                 for failed in mcp_result['failed_additions']:
+                    internal_comment += f"- {failed['number']}: {failed['error']}\n"
+            
+            # Add failed blocks details if any
+            if mcp_result.get('failed_blocks'):
+                internal_comment += f"\n⚠️ Failed Blocks:\n"
+                for failed in mcp_result['failed_blocks']:
                     internal_comment += f"- {failed['number']}: {failed['error']}\n"
             
             post_zendesk_comment(
