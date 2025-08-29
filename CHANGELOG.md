@@ -5,6 +5,19 @@ All notable changes to the US Number Order Automation System will be documented 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2025-08-28] - Deployment Trigger
+- 🔄 Trigger new deployment with latest blocking integration
+- ✅ Blocking integration tested and working in production
+- 📊 Sequential blocking test completed with 8 successful blocks out of 50 numbers
+
+## [2025-08-28] - Plivo Blocking Integration
+- 🚀 Add automatic number blocking after successful inventory addition
+- 🔧 Individual number processing to avoid MCP server limitations
+- 📝 Enhanced Zendesk notes with comprehensive blocking results
+- 🛡️ Backward compatible - no breaking changes to existing workflows
+- 🔄 Sequential API calls for reliable blocking operations
+- 📊 Comprehensive error tracking and reporting
+
 ## [1.0.0] - 2025-08-18
 
 ### 🚀 Major Features Added
