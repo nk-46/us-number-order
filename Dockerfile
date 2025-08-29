@@ -22,8 +22,6 @@ COPY zendesk_webhook.py .
 COPY startup.py .
 COPY startup.sh .
 COPY fly.toml .
-COPY CHANGELOG.md .
-COPY README.md .
 
 # Make startup script executable
 RUN chmod +x startup.sh
