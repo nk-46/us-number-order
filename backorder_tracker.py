@@ -177,7 +177,7 @@ class BackorderTracker:
             logger.error(f"❌ Failed to update backorder status: {e}")
     
     def get_pending_backorders(self) -> List[BackorderRecord]:
-        """Get all pending backorders"""
+        """Get all pending backorders (excludes completed ones)"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -206,7 +206,14 @@ class BackorderTracker:
                 records.append(record)
             
             conn.close()
-            return records
+            
+            # Filter out any backorders that might have been completed but not yet removed
+            active_records = [record for record in records if not self.is_backorder_completed(record.order_id)]
+            
+            if len(active_records) != len(records):
+                logger.info(f"🔍 Filtered out {len(records) - len(active_records)} completed backorders from tracking")
+            
+            return active_records
             
         except Exception as e:
             logger.error(f"❌ Failed to get pending backorders: {e}")
@@ -269,8 +276,58 @@ class BackorderTracker:
         except Exception as e:
             logger.error(f"❌ Failed to post status note: {e}")
 
+    def post_completion_note(self, backorder: BackorderRecord, status_result: dict):
+        """Post completion note to Zendesk when backorder status changes to Closed"""
+        try:
+            from zendesk_webhook import post_zendesk_comment
+            
+            # Extract order details from Inteliquent response structure
+            order_detail = status_result.get("orderDetailResponse", {})
+            order_status = order_detail.get("orderStatus", "unknown")
+            desired_due_date = order_detail.get("desiredDueDate", "unknown")
+            
+            # Extract completed numbers from tnList
+            completed_numbers = []
+            tn_list = order_detail.get("tnList", {}).get("tnItem", [])
+            
+            for tn_item in tn_list:
+                if tn_item.get("tnStatus") == "Complete":
+                    completed_numbers.append(tn_item.get("tn", ""))
+            
+            # Create comprehensive completion note
+            completion_note = f"""
+🎉 BACKORDER COMPLETED - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+✅ Order Status: {order_status.upper()}
+🔗 Order ID: {backorder.order_id}
+📱 Area Code: {backorder.area_code}
+📊 Quantity: {backorder.quantity}
+📅 Desired Due Date: {desired_due_date if desired_due_date != "unknown" else "N/A"}
+
+📋 Inteliquent Response Details:
+{json.dumps(order_detail, indent=2, default=str)}
+
+🚫 STATUS: This backorder is now CLOSED and will no longer be monitored.
+📝 No further internal notes will be added for this order.
+            """
+            
+            # Add completed numbers if available
+            if completed_numbers:
+                completion_note += f"\n📱 Completed Numbers: {', '.join(completed_numbers)}"
+            
+            post_zendesk_comment(
+                ticket_id=backorder.ticket_id,
+                internal_comment=completion_note,
+                public_comment=None  # Completion notes are internal only
+            )
+            
+            logger.info(f"🎉 Posted completion note for backorder {backorder.order_id} to ticket {backorder.ticket_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to post completion note: {e}")
+
     def check_backorder_completion(self, backorder: BackorderRecord) -> bool:
-        """Check if a specific backorder is completed"""
+        """Check if a specific backorder is completed (detection only, no MCP processing)"""
         try:
             # Check order status via Inteliquent API
             status_result = self.tracker.check_order_status(backorder.order_id)
@@ -296,70 +353,108 @@ class BackorderTracker:
                         completed_numbers.append(tn_item.get("tn", ""))
                 
                 if completed_numbers:
-                    # Update database
-                    self.update_backorder_status(
-                        backorder.order_id, 
-                        "completed", 
-                        datetime.now() # Set completion date to now
-                    )
-                    
-                    # Process completed numbers via MCP
-                    process_result = process_completed_order(
-                        order_id=backorder.order_id,
-                        completed_numbers=completed_numbers,
-                        ticket_id=backorder.ticket_id
-                    )
-                    
-                    # Check if MCP processing was successful (has successful_additions)
-                    if process_result.get("successful_additions"):
-                        logger.info(f"✅ Successfully processed {len(process_result['successful_additions'])} numbers from backorder {backorder.order_id}")
-                        
-                        # Update Zendesk ticket with MCP integration status
-                        if backorder.ticket_id:
-                            from mcp_integration import update_zendesk_with_mcp_status
-                            update_zendesk_with_mcp_status(
-                                ticket_id=backorder.ticket_id,
-                                mcp_result=process_result,
-                                numbers_added=process_result['successful_additions']
-                            )
-                            
-                            # Also post the general backorder completion note
-                            self.update_zendesk_ticket(
-                                ticket_id=backorder.ticket_id,
-                                order_id=backorder.order_id,
-                                completed_numbers=completed_numbers
-                            )
-                    elif process_result.get("error"):
-                        logger.error(f"❌ Failed to process completed backorder {backorder.order_id}: {process_result.get('error')}")
-                        
-                        # Post MCP failure note
-                        if backorder.ticket_id:
-                            from mcp_integration import update_zendesk_with_mcp_status
-                            update_zendesk_with_mcp_status(
-                                ticket_id=backorder.ticket_id,
-                                mcp_result=process_result,
-                                numbers_added=[]
-                            )
-                    else:
-                        logger.warning(f"⚠️ No numbers were successfully processed for backorder {backorder.order_id}")
-                        
-                        # Post partial success note
-                        if backorder.ticket_id:
-                            from mcp_integration import update_zendesk_with_mcp_status
-                            update_zendesk_with_mcp_status(
-                                ticket_id=backorder.ticket_id,
-                                mcp_result=process_result,
-                                numbers_added=[]
-                            )
-                    
+                    logger.info(f"✅ Backorder {backorder.order_id} has {len(completed_numbers)} completed numbers")
                     return True
                 else:
                     logger.warning(f"⚠️ Order {backorder.order_id} is closed but no completed numbers found")
+                    return True  # Still consider it completed even without numbers
             
             return False
             
         except Exception as e:
             logger.error(f"❌ Exception checking backorder completion: {e}")
+            return False
+
+    def process_completed_backorder(self, backorder: BackorderRecord) -> bool:
+        """Process a completed backorder with MCP integration (separate from completion detection)"""
+        try:
+            # Check order status via Inteliquent API
+            status_result = self.tracker.check_order_status(backorder.order_id)
+            
+            if "error" in status_result:
+                logger.warning(f"⚠️ Error checking order {backorder.order_id}: {status_result['error']}")
+                return False
+            
+            # Extract order details from Inteliquent response structure
+            order_detail = status_result.get("orderDetailResponse", {})
+            order_status = order_detail.get("orderStatus", "")
+            
+            if order_status != "Closed":
+                logger.warning(f"⚠️ Order {backorder.order_id} is not closed, cannot process")
+                return False
+            
+            # Extract completed numbers from tnList
+            completed_numbers = []
+            tn_list = order_detail.get("tnList", {}).get("tnItem", [])
+            
+            for tn_item in tn_list:
+                if tn_item.get("tnStatus") == "Complete":
+                    completed_numbers.append(tn_item.get("tn", ""))
+            
+            if completed_numbers:
+                # Update database
+                self.update_backorder_status(
+                    backorder.order_id, 
+                    "completed", 
+                    datetime.now() # Set completion date to now
+                )
+                
+                # Process completed numbers via MCP
+                process_result = process_completed_order(
+                    order_id=backorder.order_id,
+                    completed_numbers=completed_numbers,
+                    ticket_id=backorder.ticket_id
+                )
+                
+                # Check if MCP processing was successful (has successful_additions)
+                if process_result.get("successful_additions"):
+                    logger.info(f"✅ Successfully processed {len(process_result['successful_additions'])} numbers from backorder {backorder.order_id}")
+                    
+                    # Update Zendesk ticket with MCP integration status
+                    if backorder.ticket_id:
+                        from mcp_integration import update_zendesk_with_mcp_status
+                        update_zendesk_with_mcp_status(
+                            ticket_id=backorder.ticket_id,
+                            mcp_result=process_result,
+                            numbers_added=process_result['successful_additions']
+                        )
+                        
+                        # Also post the general backorder completion note
+                        self.update_zendesk_ticket(
+                            ticket_id=backorder.ticket_id,
+                            order_id=backorder.order_id,
+                            completed_numbers=completed_numbers
+                        )
+                elif process_result.get("error"):
+                    logger.error(f"❌ Failed to process completed backorder {backorder.order_id}: {process_result.get('error')}")
+                    
+                    # Post MCP failure note
+                    if backorder.ticket_id:
+                        from mcp_integration import update_zendesk_with_mcp_status
+                        update_zendesk_with_mcp_status(
+                            ticket_id=backorder.ticket_id,
+                            mcp_result=process_result,
+                            numbers_added=[]
+                        )
+                else:
+                    logger.warning(f"⚠️ No numbers were successfully processed for backorder {backorder.order_id}")
+                    
+                    # Post partial success note
+                    if backorder.ticket_id:
+                        from mcp_integration import update_zendesk_with_mcp_status
+                        update_zendesk_with_mcp_status(
+                            ticket_id=backorder.ticket_id,
+                            mcp_result=process_result,
+                            numbers_added=[]
+                        )
+                
+                return True
+            else:
+                logger.warning(f"⚠️ Order {backorder.order_id} is closed but no completed numbers found")
+                return False
+            
+        except Exception as e:
+            logger.error(f"❌ Exception processing completed backorder: {e}")
             return False
     
     def update_zendesk_ticket(self, ticket_id: str, order_id: str, completed_numbers: List[str]):
@@ -451,6 +546,11 @@ class BackorderTracker:
                             if hasattr(backorder, 'last_status') and backorder.last_status != current_status:
                                 status_changed = True
                                 logger.info(f"🔄 Status change detected for backorder {backorder.order_id}: {backorder.last_status} → {current_status}")
+                                
+                                # If status changed to "Closed", post completion note immediately
+                                if current_status == "Closed":
+                                    logger.info(f"🎉 Backorder {backorder.order_id} status changed to CLOSED - posting completion note")
+                                    self.post_completion_note(backorder, status_result)
                             
                             # Store current status for next comparison
                             backorder.last_status = current_status
@@ -459,12 +559,42 @@ class BackorderTracker:
                             if current_status == "Closed":
                                 if self.check_backorder_completion(backorder):
                                     logger.info(f"✅ Backorder {backorder.order_id} completed!")
+                                    
+                                    # Process the completion with MCP integration
+                                    if self.process_completed_backorder(backorder):
+                                        logger.info(f"✅ Successfully processed backorder {backorder.order_id} with MCP integration")
+                                    else:
+                                        logger.warning(f"⚠️ Failed to process backorder {backorder.order_id} with MCP integration")
+                                    
+                                    # CRITICAL FIX: Clear all timers immediately to prevent any further updates
+                                    self.clear_backorder_timers(backorder.order_id, last_status_updates)
+                                    
                                     # Remove from tracking after completion
                                     self.remove_completed_backorder(backorder.order_id)
+                                    # Continue to next backorder - don't process this one further
+                                    continue
                                 else:
                                     logger.warning(f"⚠️ Order {backorder.order_id} is closed but no completed numbers found")
+                                    # Even if no numbers, mark as completed to stop further processing
+                                    self.update_backorder_status(backorder.order_id, "completed", datetime.now())
+                                    
+                                    # CRITICAL FIX: Clear all timers immediately to prevent any further updates
+                                    self.clear_backorder_timers(backorder.order_id, last_status_updates)
+                                    
+                                    self.remove_completed_backorder(backorder.order_id)
+                                    continue
                             
-                            # Post status update to Zendesk every 4 hours (regardless of status change)
+                            # Skip status updates for completed backorders
+                            if self.is_backorder_completed(backorder.order_id):
+                                logger.info(f"⏭️ Skipping status update for completed backorder {backorder.order_id}")
+                                continue
+                            
+                            # ADDITIONAL SAFETY: Skip status updates if we just detected completion
+                            if current_status == "Closed":
+                                logger.info(f"⏭️ Skipping status update for backorder {backorder.order_id} - status is Closed, processing completion")
+                                continue
+                            
+                            # Post status update to Zendesk every 4 hours (only for non-completed backorders)
                             last_update = last_status_updates.get(backorder.order_id)
                             should_update_ticket = (
                                 last_update is None or 
@@ -494,6 +624,40 @@ class BackorderTracker:
             except Exception as e:
                 logger.error(f"❌ Exception in tracking loop: {e}")
                 time.sleep(3600)  # Wait 1 hour on error
+
+    def is_backorder_completed(self, order_id: str) -> bool:
+        """Check if backorder is already completed"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT status FROM backorders WHERE order_id = ?
+            ''', (order_id,))
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            return result and result[0] == "completed"
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking backorder completion status: {e}")
+            return False
+
+    def clear_backorder_timers(self, order_id: str, last_status_updates: dict):
+        """Clear all tracking timers for a completed backorder"""
+        try:
+            # Clear status update timer
+            if order_id in last_status_updates:
+                del last_status_updates[order_id]
+                logger.info(f"⏰ Cleared status update timer for completed backorder {order_id}")
+            
+            # Clear any other timers that might be stored in the backorder object
+            # This ensures no residual timing data remains
+            logger.info(f"🧹 Cleared all timers for completed backorder {order_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error clearing timers for backorder {order_id}: {e}")
 
 # Global tracker instance
 backorder_tracker = None
