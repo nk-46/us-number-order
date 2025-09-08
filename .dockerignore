@@ -197,6 +197,12 @@ site
 **/deep_dive
 **/backup.tar.gz
 
+# Development and testing files
+**/latest-code/
+**/fly-test.toml
+**/data/
+**/*.log
+
 # Git and version control
 **/.git
 **/.gitignore
@@ -215,10 +221,10 @@ site
 **/*.backup
 
 # Documentation and readme files (not needed in container)
-**/README.md
 **/CHANGELOG.md
 **/LICENSE
 **/*.md
+# Keep README.md for container documentation
 
 # IDE and editor files
 **/.vscode

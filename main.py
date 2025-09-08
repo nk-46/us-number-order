@@ -4,32 +4,22 @@ import time
 import base64
 import requests
 import logging
-import logging.handlers
-import sys
 import json
-import redis
-import openai
-from plivo import plivoxml
+from dotenv import load_dotenv
+from openai import OpenAI
 from plivo import RestClient
-from flask import Flask, request, jsonify
-import threading
-import fcntl
-import tempfile
-import signal
-from datetime import datetime, timedelta
 from collections import defaultdict
 import phonenumbers
 from phonenumbers import parse, NumberParseException, region_code_for_number, geocoder
 
 # Load environment variables
-from dotenv import load_dotenv
 load_dotenv(override=True)
 
 # --------------------------- SETUP CLIENTS ---------------------------
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PROJECT_ID = os.getenv("OPENAI_PROJECT_ID")
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY, project=PROJECT_ID)
+openai_client = OpenAI(api_key=OPENAI_API_KEY, project=PROJECT_ID)
 ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 iq_trunk_group = os.getenv("IQ_TRUNK_GROUP")
 
@@ -58,49 +48,17 @@ iq_headers = {
     "Content-Type": "application/json"
 }
 
-# Configure logging with rotation and memory optimization
-def setup_logging():
-    """Setup optimized logging with rotation and memory management"""
-    log_dir = "/data" if os.path.exists("/data") else "./data"
-    os.makedirs(log_dir, exist_ok=True)
-    
-    # Create rotating file handler (10MB max, keep 3 files)
-    log_file = os.path.join(log_dir, "us_ca_lc.log")
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file, 
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=3,
-        encoding='utf-8'
-    )
-    
-    # Create console handler
-    console_handler = logging.StreamHandler()
-    
-    # Create formatter
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    # Configure root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)  # Reduce from DEBUG to INFO
-    root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
-    
-    # Reduce verbose logging from external libraries
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    
-    return root_logger
-
-# Setup logging
-logger = setup_logging()
+# Configure logging
+LOG_FILE = "/data/us_ca_lc.log"
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # --------------------------- UTILITY FUNCTIONS ---------------------------
 
@@ -409,20 +367,6 @@ def handle_user_request(user_input,ticket_id=None):
                 logger.info(f"📦 Full backorder placed. Order ID: {order_id}")
                 results_text += f"\n📦 Backorder placed for full quantity. Order ID: {order_id}\n"
 
-                # Add backorder to tracking database
-                try:
-                    from backorder_tracker import get_backorder_tracker
-                    tracker = get_backorder_tracker()
-                    tracker.add_backorder(
-                        order_id=order_id,
-                        area_code=search_key,
-                        quantity=quantity,
-                        ticket_id=ticket_id
-                    )
-                    logger.info(f"✅ Backorder {order_id} added to tracking database")
-                except Exception as e:
-                    logger.error(f"❌ Failed to add backorder to tracking: {e}")
-
                 iq_backorder_summary[search_key] = quantity
 
                 continue  # Skip rest of loop
@@ -462,67 +406,6 @@ def handle_user_request(user_input,ticket_id=None):
                     logger.info(f"✅ Ordered {len(total_results)} numbers for area code {area_code}")
                     print(json.dumps(order_response, indent=5))
                     results_text += f"\n\n{order_response}"
-                    
-                    # 🔄 Add MCP integration for immediate orders
-                    try:
-                        from mcp_integration import MCPNumberInventory, NumberInfo, get_region_id_from_area_code, update_zendesk_with_mcp_status
-                        import os
-                        
-                        mcp_client = MCPNumberInventory()
-                        successful_additions = []
-                        failed_additions = []
-                        
-                        for tn in total_results:
-                            number = tn.get("telephoneNumber")
-                            area_code = number[:3]
-                            region_id = get_region_id_from_area_code(area_code)
-                            carrier_tier_id = int(os.getenv('MCP_CARRIER_TIER_US', '10000252')) if region_id == 101 else int(os.getenv('MCP_CARRIER_TIER_CA', '10000253'))
-                            
-                            number_info = NumberInfo(
-                                number=number,
-                                carrier_id=os.getenv('MCP_CARRIER_ID'),
-                                carrier_tier_id=carrier_tier_id,
-                                region_id=region_id
-                            )
-                            
-                            result = mcp_client.add_numbers_to_inventory(
-                                numbers=[number_info],
-                                user_email=os.getenv('MCP_USER_EMAIL', 'kiran.a@plivo.com'),
-                                skip_number_testing=True,
-                                reason_skip_number_testing=f"Immediate order for ticket {ticket_id}"
-                            )
-                            
-                            if result.get('success'):
-                                successful_additions.append(number)
-                                logger.info(f"✅ Added {number} to inventory via MCP")
-                            else:
-                                failed_additions.append({
-                                    'number': number,
-                                    'error': result.get('error', 'Unknown error')
-                                })
-                                logger.error(f"❌ Failed to add {number} to inventory: {result.get('error')}")
-                        
-                        # Prepare MCP result for Zendesk update
-                        mcp_result = {
-                            'order_id': order_response.get('orderId', 'N/A'),
-                            'total_numbers': len(total_results),
-                            'successful_additions': successful_additions,
-                            'failed_additions': failed_additions,
-                            'ticket_id': ticket_id
-                        }
-                        
-                        # Update Zendesk with MCP status
-                        if ticket_id:
-                            update_zendesk_with_mcp_status(
-                                ticket_id=ticket_id,
-                                mcp_result=mcp_result,
-                                numbers_added=successful_additions
-                            )
-                            logger.info(f"✅ MCP integration completed for immediate order - {len(successful_additions)} successful, {len(failed_additions)} failed")
-                        
-                    except Exception as e:
-                        logger.error(f"⚠️ MCP integration failed for immediate order: {e}")
-                        
                 except Exception as e:
                     print(f"Failed to order numbers {e}")
 
@@ -539,21 +422,6 @@ def handle_user_request(user_input,ticket_id=None):
                     order_id = backorder_response.get("orderId") or backorder_response.get("tnOrderId", "N/A")
                     logger.info(f"📦 Backorder placed for remaining. Order ID: {order_id}")
                     results_text += f"\n📦 Backorder placed for remaining {remaining_quantity}. Order ID: {order_id}\n"
-                    
-                    # Add backorder to tracking database
-                    try:
-                        from backorder_tracker import get_backorder_tracker
-                        tracker = get_backorder_tracker()
-                        tracker.add_backorder(
-                            order_id=order_id,
-                            area_code=search_key,
-                            quantity=remaining_quantity,
-                            ticket_id=ticket_id
-                        )
-                        logger.info(f"✅ Backorder {order_id} added to tracking database")
-                    except Exception as e:
-                        logger.error(f"❌ Failed to add backorder to tracking: {e}")
-                    
                     logger.info(f"📋 Final Backorder Summary: {json.dumps(iq_backorder_summary, indent=2)}")
 
                     iq_backorder_summary[search_key] = remaining_quantity
@@ -596,22 +464,10 @@ def handle_user_request(user_input,ticket_id=None):
 
 
     print(f"Public text: {public_text}")
-    
-    # Handle case where no numbers were processed (search_key might not be defined)
-    if 'search_key' not in locals():
-        search_key = "N/A"
-        print(f"Prefix: {search_key} (no numbers processed)")
-    else:
-        print(f"Prefix: {search_key}")
-    
+    print(f"Prefix: {search_key}")
     print(f"Ordered numbers: {ordered_number_details}")
     internal_comment = full_output + results_text.strip()
     print(f"Internal comment: {internal_comment}")
-    
-    # Handle backorder_response variable
-    if 'backorder_response' not in locals():
-        backorder_response = "N/A"
-    
     print(f"Backorder response: {backorder_response}")
     return {
         "skip_update": False,
